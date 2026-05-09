@@ -1,0 +1,102 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "stream-analyzer-lite",
+  "version": "0.1.0",
+  "identifier": "com.streamanalyzer.lite",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "ui/icons/32x32.png",
+      "ui/icons/128x128.png",
+      "ui/icons/128x128@2x.png",
+      "ui/icons/icon.png"
+    ],
+    "resources": [
+      "analyzer-core/stream-analyzer-core"
+    ],
+    "linux": {
+      "deb": {
+        "desktopTemplate": "packaging/linux/stream-analyzer-lite.desktop.hbs",
+        "postInstallScript": "packaging/linux/postinst.sh",
+        "postRemoveScript": "packaging/linux/postrm.sh",
+        "files": {
+          "/usr/share/icons/hicolor/16x16/apps/stream-analyzer-lite.png": "ui/icons/16x16.png",
+          "/usr/share/icons/hicolor/16x16/apps/com.streamanalyzer.lite.png": "ui/icons/16x16.png",
+          "/usr/share/applications/com.streamanalyzer.lite.desktop": "packaging/linux/com.streamanalyzer.lite.desktop",
+          "/usr/share/icons/hicolor/22x22/apps/stream-analyzer-lite.png": "ui/icons/22x22.png",
+          "/usr/share/icons/hicolor/22x22/apps/com.streamanalyzer.lite.png": "ui/icons/22x22.png",
+          "/usr/share/icons/hicolor/24x24/apps/stream-analyzer-lite.png": "ui/icons/24x24.png",
+          "/usr/share/icons/hicolor/24x24/apps/com.streamanalyzer.lite.png": "ui/icons/24x24.png",
+          "/usr/share/icons/hicolor/32x32/apps/stream-analyzer-lite.png": "ui/icons/32x32.png",
+          "/usr/share/icons/hicolor/32x32/apps/com.streamanalyzer.lite.png": "ui/icons/32x32.png",
+          "/usr/share/icons/hicolor/48x48/apps/stream-analyzer-lite.png": "ui/icons/48x48.png",
+          "/usr/share/icons/hicolor/48x48/apps/com.streamanalyzer.lite.png": "ui/icons/48x48.png",
+          "/usr/share/icons/hicolor/64x64/apps/stream-analyzer-lite.png": "ui/icons/64x64.png",
+          "/usr/share/icons/hicolor/64x64/apps/com.streamanalyzer.lite.png": "ui/icons/64x64.png",
+          "/usr/share/icons/hicolor/128x128/apps/stream-analyzer-lite.png": "ui/icons/128x128.png",
+          "/usr/share/icons/hicolor/128x128/apps/com.streamanalyzer.lite.png": "ui/icons/128x128.png",
+          "/usr/share/icons/hicolor/256x256/apps/stream-analyzer-lite.png": "ui/icons/256x256.png",
+          "/usr/share/icons/hicolor/256x256/apps/com.streamanalyzer.lite.png": "ui/icons/256x256.png",
+          "/usr/share/icons/hicolor/512x512/apps/stream-analyzer-lite.png": "ui/icons/512x512.png",
+          "/usr/share/icons/hicolor/512x512/apps/com.streamanalyzer.lite.png": "ui/icons/512x512.png",
+          "/usr/share/icons/hicolor/scalable/apps/stream-analyzer-lite.svg": "ui/icons/icon.svg",
+          "/usr/share/icons/hicolor/scalable/apps/com.streamanalyzer.lite.svg": "ui/icons/icon.svg",
+          "/usr/share/pixmaps/stream-analyzer-lite.png": "ui/icons/icon.png",
+          "/usr/share/pixmaps/com.streamanalyzer.lite.png": "ui/icons/icon.png"
+        }
+      },
+      "rpm": {
+        "desktopTemplate": "packaging/linux/stream-analyzer-lite.desktop.hbs",
+        "postInstallScript": "packaging/linux/postinst.sh",
+        "postRemoveScript": "packaging/linux/postrm.sh",
+        "files": {
+          "/usr/share/icons/hicolor/16x16/apps/stream-analyzer-lite.png": "ui/icons/16x16.png",
+          "/usr/share/icons/hicolor/16x16/apps/com.streamanalyzer.lite.png": "ui/icons/16x16.png",
+          "/usr/share/applications/com.streamanalyzer.lite.desktop": "packaging/linux/com.streamanalyzer.lite.desktop",
+          "/usr/share/icons/hicolor/22x22/apps/stream-analyzer-lite.png": "ui/icons/22x22.png",
+          "/usr/share/icons/hicolor/22x22/apps/com.streamanalyzer.lite.png": "ui/icons/22x22.png",
+          "/usr/share/icons/hicolor/24x24/apps/stream-analyzer-lite.png": "ui/icons/24x24.png",
+          "/usr/share/icons/hicolor/24x24/apps/com.streamanalyzer.lite.png": "ui/icons/24x24.png",
+          "/usr/share/icons/hicolor/32x32/apps/stream-analyzer-lite.png": "ui/icons/32x32.png",
+          "/usr/share/icons/hicolor/32x32/apps/com.streamanalyzer.lite.png": "ui/icons/32x32.png",
+          "/usr/share/icons/hicolor/48x48/apps/stream-analyzer-lite.png": "ui/icons/48x48.png",
+          "/usr/share/icons/hicolor/48x48/apps/com.streamanalyzer.lite.png": "ui/icons/48x48.png",
+          "/usr/share/icons/hicolor/64x64/apps/stream-analyzer-lite.png": "ui/icons/64x64.png",
+          "/usr/share/icons/hicolor/64x64/apps/com.streamanalyzer.lite.png": "ui/icons/64x64.png",
+          "/usr/share/icons/hicolor/128x128/apps/stream-analyzer-lite.png": "ui/icons/128x128.png",
+          "/usr/share/icons/hicolor/128x128/apps/com.streamanalyzer.lite.png": "ui/icons/128x128.png",
+          "/usr/share/icons/hicolor/256x256/apps/stream-analyzer-lite.png": "ui/icons/256x256.png",
+          "/usr/share/icons/hicolor/256x256/apps/com.streamanalyzer.lite.png": "ui/icons/256x256.png",
+          "/usr/share/icons/hicolor/512x512/apps/stream-analyzer-lite.png": "ui/icons/512x512.png",
+          "/usr/share/icons/hicolor/512x512/apps/com.streamanalyzer.lite.png": "ui/icons/512x512.png",
+          "/usr/share/icons/hicolor/scalable/apps/stream-analyzer-lite.svg": "ui/icons/icon.svg",
+          "/usr/share/icons/hicolor/scalable/apps/com.streamanalyzer.lite.svg": "ui/icons/icon.svg",
+          "/usr/share/pixmaps/stream-analyzer-lite.png": "ui/icons/icon.png",
+          "/usr/share/pixmaps/com.streamanalyzer.lite.png": "ui/icons/icon.png"
+        }
+      }
+    }
+  },
+  "app": {
+    "enableGTKAppId": true,
+    "windows": [
+      {
+        "title": "Stream Analyzer Lite",
+        "width": 1024,
+        "height": 700
+      }
+    ],
+    "security": {
+      "capabilities": [
+        {
+          "identifier": "default",
+          "windows": ["main"],
+          "permissions": ["dialog:default"]
+        }
+      ]
+    }
+  }
+}

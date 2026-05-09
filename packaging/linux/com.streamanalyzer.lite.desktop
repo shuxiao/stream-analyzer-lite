@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Stream Analyzer Lite
+Exec=stream-analyzer-lite
+Comment=Inspect H.264 and H.265/HEVC video bitstreams frame by frame
+Icon=com.streamanalyzer.lite
+StartupWMClass=com.streamanalyzer.lite
+StartupNotify=true
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=video;stream;bitstream;h264;h265;hevc;analysis;

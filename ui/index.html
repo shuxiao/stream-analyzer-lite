@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stream Analyzer Lite</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #333; height: 100vh; overflow: hidden; }
+
+  /* === Input View === */
+  #inputView { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; gap: 16px; }
+  #inputView h1 { font-size: 1.6em; color: #d63050; }
+  #inputView .row { display: flex; gap: 8px; width: 500px; max-width: 90vw; }
+  #inputView input { flex: 1; padding: 10px 14px; border: 1px solid #ccc; border-radius: 6px; background: #fff; color: #333; font-size: 14px; }
+  #inputView button { padding: 10px 20px; background: #d63050; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  #inputView button:hover { background: #b82845; }
+  #inputView .error { color: #d63050; font-size: 13px; min-height: 20px; }
+
+  /* === Bitstream View === */
+  #bitstreamView { display: none; height: 100vh; flex-direction: column; }
+  #topBar { display: flex; align-items: center; padding: 10px 16px; background: #fff; border-bottom: 1px solid #ddd; gap: 16px; flex-shrink: 0; }
+  #topBar .info { font-size: 13px; color: #666; }
+  #topBar .info b { color: #333; }
+  #topBar button { padding: 6px 14px; background: #eee; color: #444; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 13px; }
+  #topBar button:hover { background: #ddd; }
+  #ptsJump { width: 100px; padding: 5px 8px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; font-family: monospace; }
+  #ptsJump::placeholder { color: #aaa; font-family: system-ui, sans-serif; }
+  .legend { display: flex; gap: 14px; font-size: 12px; margin-left: auto; color: #555; }
+  .legend span { display: flex; align-items: center; gap: 4px; }
+  .legend .dot { width: 10px; height: 10px; border-radius: 2px; }
+  .dot-I { background: #d63050; }
+  .dot-P { background: #2a7ab5; }
+  .dot-B { background: #7b5ea7; }
+
+  /* === Chart Area === */
+  #chartArea { flex: 1; position: relative; overflow: hidden; cursor: default; background: #fff; }
+  #chartArea.grabbing { cursor: grabbing; }
+  #chartCanvas { display: block; }
+
+  /* === Tooltip === */
+  #tooltip { display: none; position: absolute; background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 8px 10px; font-size: 12px; font-family: monospace; pointer-events: none; z-index: 10; white-space: pre; color: #333; box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
+
+  /* === Scrollbar / minimap === */
+  #scrollBar { height: 32px; background: #e8e8e8; flex-shrink: 0; position: relative; cursor: pointer; }
+  #scrollThumb { position: absolute; top: 4px; height: 24px; background: rgba(214,48,80,0.3); border-radius: 3px; cursor: grab; min-width: 20px; }
+  #scrollThumb:hover, #scrollThumb.active { background: rgba(214,48,80,0.5); }
+
+  /* === Resize Splitter === */
+  #splitter { height: 6px; background: #e0e0e0; cursor: row-resize; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+  #splitter:hover, #splitter.active { background: #ccc; }
+  #splitter::after { content: ''; display: block; width: 40px; height: 2px; border-top: 1px solid #aaa; border-bottom: 1px solid #aaa; }
+
+  /* === NALU Panel === */
+  #naluPanel { flex-shrink: 0; height: 55vh; min-height: 60px; background: #fff; border-top: 1px solid #ddd; display: flex; }
+  #naluList { width: 40%; min-width: 200px; overflow-y: auto; padding: 10px 12px; border-right: 1px solid #eee; }
+  #naluDetail { flex: 1; overflow-y: auto; padding: 10px 16px; }
+  .nalu-empty { color: #aaa; font-size: 13px; text-align: center; padding: 16px; }
+  #naluList h3 { font-size: 13px; color: #666; margin-bottom: 8px; font-weight: 500; }
+  .nalu-item { border: 1px solid #e0e0e0; border-radius: 4px; margin-bottom: 4px; cursor: pointer; }
+  .nalu-item:hover { background: #f0f0f0; }
+  .nalu-item.selected { background: #eef4ff; border-color: #2a7ab5; }
+  .nalu-header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; font-size: 13px; }
+  .nalu-header .nalu-tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; font-weight: 600; color: #fff; }
+  .nalu-tag-sps { background: #d63050; }
+  .nalu-tag-pps { background: #2a7ab5; }
+  .nalu-tag-sei { background: #e8a030; }
+  .nalu-tag-slice { background: #7b5ea7; }
+  .nalu-tag-other { background: #999; }
+  .nalu-header .nalu-len { color: #999; margin-left: auto; font-size: 12px; }
+  .nalu-detail-view h4 { font-size: 13px; color: #555; margin-bottom: 8px; font-weight: 500; }
+  .nalu-detail-view table { border-collapse: collapse; width: 100%; font-size: 12px; font-family: monospace; }
+  .nalu-detail-view td { padding: 3px 8px; border-bottom: 1px solid #f0f0f0; }
+  .nalu-detail-view td:first-child { color: #888; white-space: nowrap; width: 1%; }
+  .nalu-detail-view td:last-child { color: #333; }
+
+  /* === View Toggle === */
+  .view-toggle { display: flex; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; }
+  .view-toggle button { padding: 4px 12px; background: #f5f5f5; color: #666; border: none; cursor: pointer; font-size: 12px; border-right: 1px solid #ccc; }
+  .view-toggle button:last-child { border-right: none; }
+  .view-toggle button.active { background: #d63050; color: #fff; }
+
+  /* === Thumbnail View === */
+  #thumbArea { flex: 1; position: relative; overflow: hidden; cursor: default; background: #fff; display: none; flex-direction: column; }
+  #thumbCanvas { display: block; flex: 1; }
+  #gopNav { display: flex; align-items: center; gap: 12px; padding: 6px 16px; background: #fafafa; border-bottom: 1px solid #eee; flex-shrink: 0; }
+  #gopNav button { padding: 4px 12px; background: #eee; color: #444; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  #gopNav button:hover { background: #ddd; }
+  #gopInfo { font-size: 12px; color: #666; font-family: monospace; }
+
+  /* === Frame Preview === */
+  .frame-preview { display: flex; align-items: center; justify-content: center; height: 100%; background: #1a1a1a; }
+  .frame-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .frame-preview .empty { color: #888; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<!-- Input View -->
+<div id="inputView">
+  <h1>Stream Analyzer Lite</h1>
+  <div class="row">
+    <input id="fileInput" placeholder="Enter video file path, e.g. /path/to/video.mp4" aria-label="Video file path">
+    <button onclick="openFile()">Open</button>
+    <button onclick="doAnalyze()">Analyze</button>
+  </div>
+  <div class="error" id="error"></div>
+</div>
+
+<!-- Bitstream View -->
+<div id="bitstreamView">
+  <div id="topBar">
+    <button onclick="goBack()">← Back</button>
+    <div class="info" id="videoInfo"></div>
+    <input id="ptsJump" type="text" placeholder="Go to PTS" onkeydown="if(event.key==='Enter')jumpToPts(this.value)">
+    <div class="view-toggle">
+      <button id="btnBarChart" class="active" onclick="switchView('bar')">BarChart</button>
+      <button id="btnThumbnails" onclick="switchView('thumb')">Thumbnails</button>
+    </div>
+    <div class="legend">
+      <span><div class="dot dot-I"></div> I</span>
+      <span><div class="dot dot-P"></div> P</span>
+      <span><div class="dot dot-B"></div> B</span>
+    </div>
+  </div>
+  <div id="chartArea">
+    <canvas id="chartCanvas"></canvas>
+    <div id="tooltip"></div>
+  </div>
+  <div id="thumbArea">
+    <div id="gopNav">
+      <button onclick="gopPagePrev()">◀ Prev GOP</button>
+      <span id="gopInfo"></span>
+      <button onclick="gopPageNext()">Next GOP ▶</button>
+    </div>
+    <canvas id="thumbCanvas"></canvas>
+  </div>
+  <div id="scrollBar"><div id="scrollThumb"></div></div>
+  <div id="splitter"></div>
+  <div id="naluPanel">
+    <div id="naluList"><div class="nalu-empty">Click a frame to view NALUs</div></div>
+    <div id="naluDetail"><div class="nalu-empty">Select a NALU to view details</div></div>
+  </div>
+</div>
+
+<script>
+let frames = [];
+let maxSize = 1;
+let offset = 0;        // first visible frame index
+let barWidth = 18;
+let barGap = 2;
+let visibleCount = 50;
+let dragging = false;
+let dragStartX = 0;
+let dragStartOffset = 0;
+let viewMode = 'bar'; // 'bar' or 'thumb'
+let thumbImages = {};  // cache: frame index -> Image object (small)
+let previewImages = {}; // cache: frame index -> data URI string (full res)
+let currentFile = '';
+let currentCodec = 'h264';
+let gops = []; // [{start, end}] GOP boundaries
+let currentGopIdx = 0; // which GOP is currently displayed
+
+const colors = { I: '#d63050', P: '#2a7ab5', B: '#7b5ea7' };
+const colorsHover = { I: '#e8506e', P: '#3a8ec8', B: '#9070bb' };
+let timeBaseNum = 1, timeBaseDen = 1;
+function ptsToMs(pts) { return pts * timeBaseNum / timeBaseDen * 1000; }
+
+const canvas = document.getElementById('chartCanvas');
+const ctx = canvas.getContext('2d');
+const chartArea = document.getElementById('chartArea');
+const tooltip = document.getElementById('tooltip');
+const thumbCanvas = document.getElementById('thumbCanvas');
+const thumbCtx = thumbCanvas.getContext('2d');
+const thumbArea = document.getElementById('thumbArea');
+
+/* ---- View switching ---- */
+function switchView(mode) {
+  viewMode = mode;
+  document.getElementById('btnBarChart').classList.toggle('active', mode === 'bar');
+  document.getElementById('btnThumbnails').classList.toggle('active', mode === 'thumb');
+  chartArea.style.display = mode === 'bar' ? 'block' : 'none';
+  thumbArea.style.display = mode === 'thumb' ? 'flex' : 'none';
+  document.getElementById('scrollBar').style.display = mode === 'bar' ? '' : 'none';
+  if (mode === 'thumb') {
+    // Find which GOP contains current offset
+    currentGopIdx = gopIndexAt(offset);
+    offset = gops[currentGopIdx].start;
+    loadCurrentGop();
+  }
+  onResize();
+}
+
+/* ---- Open file dialog ---- */
+async function openFile() {
+  if (!window.__TAURI_INTERNALS__) return;
+  try {
+    const path = await window.__TAURI_INTERNALS__.invoke('pick_file');
+    document.getElementById('fileInput').value = path;
+    doAnalyze();
+  } catch (e) {
+    // user cancelled, ignore
+  }
+}
+
+/* ---- Analyze ---- */
+async function doAnalyze() {
+  const file = document.getElementById('fileInput').value.trim();
+  if (!file) return;
+  const errEl = document.getElementById('error');
+  errEl.textContent = '';
+
+  try {
+    let data;
+    if (window.__TAURI_INTERNALS__) {
+      const json = await window.__TAURI_INTERNALS__.invoke('analyze', { file });
+      data = JSON.parse(json);
+    } else {
+      const res = await fetch('http://localhost:9210/analyze?file=' + encodeURIComponent(file));
+      if (!res.ok) throw new Error(await res.text());
+      data = await res.json();
+    }
+
+    frames = data.frames;
+    maxSize = Math.max(...frames.map(f => f.size), 1);
+    timeBaseNum = data.video.time_base_num || 1;
+    timeBaseDen = data.video.time_base_den || 1;
+    offset = 0;
+    currentFile = file;
+    currentCodec = data.video.codec || 'h264';
+    thumbImages = {};
+    previewImages = {};
+    loadedGops = new Set();
+    // Build GOP list from I-frame positions
+    gops = [];
+    for (let i = 0; i < frames.length; i++) {
+      if (frames[i].type === 'I') gops.push({ start: i });
+      if (gops.length > 1) gops[gops.length - 2].end = i;
+    }
+    if (gops.length > 0) gops[gops.length - 1].end = frames.length;
+    currentGopIdx = 0;
+    document.getElementById('videoInfo').innerHTML =
+      '<b>' + data.video.codec.toUpperCase() + '</b> &nbsp; ' +
+      data.video.width + '×' + data.video.height + ' &nbsp; ' +
+      frames.length + ' frames';
+
+    document.getElementById('inputView').style.display = 'none';
+    document.getElementById('bitstreamView').style.display = 'flex';
+    onResize();
+  } catch (e) {
+    errEl.textContent = typeof e === 'string' ? e : e.message || String(e);
+  }
+}
+
+function goBack() {
+  document.getElementById('bitstreamView').style.display = 'none';
+  document.getElementById('inputView').style.display = 'flex';
+}
+
+/* ---- Drawing ---- */
+function draw(hoverIdx) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const chartH = h - 30; // leave room for PTS labels
+  ctx.clearRect(0, 0, w, h);
+
+  // Y-axis grid lines
+  ctx.strokeStyle = '#e0e0e0';
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 4; i++) {
+    const y = chartH - (chartH * i / 4);
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  // Y-axis labels
+  ctx.fillStyle = '#999';
+  ctx.font = '10px system-ui';
+  ctx.textAlign = 'right';
+  for (let i = 1; i <= 4; i++) {
+    const val = maxSize * i / 4;
+    const y = chartH - (chartH * i / 4);
+    const label = val >= 1024 ? (val / 1024).toFixed(0) + 'K' : val.toFixed(0);
+    ctx.fillText(label, 36, y + 3);
+  }
+
+  const startX = 42;
+  const step = barWidth + barGap;
+
+  // Draw PTS tick marks on X axis (evenly spaced among visible frames)
+  const visibleFrames = [];
+  for (let i = 0; i < visibleCount && (offset + i) < frames.length; i++) {
+    visibleFrames.push({ frame: frames[offset + i], x: startX + i * step, localIdx: i });
+  }
+  if (visibleFrames.length > 0) {
+    const tickCount = Math.max(1, Math.floor(visibleFrames.length / 8));
+    ctx.fillStyle = '#bbb';
+    ctx.strokeStyle = '#f0f0f0';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'center';
+    for (let ti = 0; ti < visibleFrames.length; ti += tickCount) {
+      const v = visibleFrames[ti];
+      const xc = v.x + barWidth / 2;
+      ctx.beginPath();
+      ctx.moveTo(xc, chartH);
+      ctx.lineTo(xc, chartH + 4);
+      ctx.stroke();
+      ctx.fillText(String(v.frame.pts), xc, h - 4);
+    }
+  }
+
+  for (let i = 0; i < visibleCount && (offset + i) < frames.length; i++) {
+    const f = frames[offset + i];
+    const barH = Math.max(2, (f.size / maxSize) * (chartH - 10));
+    const x = startX + i * step;
+    const y = chartH - barH;
+    const isHover = (offset + i) === hoverIdx;
+
+    ctx.fillStyle = isHover ? (colorsHover[f.type] || '#888') : (colors[f.type] || '#555');
+    ctx.fillRect(x, y, barWidth, barH);
+  }
+
+  updateScrollThumb();
+}
+
+/* ---- Scroll thumb ---- */
+function updateScrollThumb() {
+  if (frames.length === 0) return;
+  const bar = document.getElementById('scrollBar');
+  const thumb = document.getElementById('scrollThumb');
+  const ratio = visibleCount / frames.length;
+  const thumbW = Math.max(20, bar.clientWidth * ratio);
+  const maxLeft = bar.clientWidth - thumbW;
+  const left = frames.length <= visibleCount ? 0 : (offset / (frames.length - visibleCount)) * maxLeft;
+  thumb.style.width = thumbW + 'px';
+  thumb.style.left = left + 'px';
+}
+
+/* ---- Resize ---- */
+function onResize() {
+  const rect = chartArea.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = rect.height;
+  visibleCount = Math.floor((canvas.width - 42) / (barWidth + barGap));
+
+  const trect = thumbCanvas.getBoundingClientRect();
+  thumbCanvas.width = trect.width;
+  thumbCanvas.height = trect.height;
+
+  clampOffset();
+  if (viewMode === 'bar') draw(-1);
+  else drawThumbnails(-1);
+}
+
+function clampOffset() {
+  offset = Math.max(0, Math.min(offset, frames.length - visibleCount));
+}
+
+/* ---- Chart drag to pan ---- */
+let dragMoved = false;
+chartArea.addEventListener('mousedown', e => {
+  dragging = true;
+  dragMoved = false;
+  dragStartX = e.clientX;
+  dragStartOffset = offset;
+  chartArea.classList.add('grabbing');
+});
+window.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  const dx = dragStartX - e.clientX;
+  if (Math.abs(dx) > 3) dragMoved = true;
+  const frameDelta = Math.round(dx / (barWidth + barGap));
+  offset = dragStartOffset + frameDelta;
+  clampOffset();
+  draw(-1);
+});
+window.addEventListener('mouseup', () => {
+  dragging = false;
+  chartArea.classList.remove('grabbing');
+});
+
+/* ---- Mouse wheel to scroll ---- */
+chartArea.addEventListener('wheel', e => {
+  e.preventDefault();
+  offset += Math.sign(e.deltaY) * Math.max(1, Math.floor(visibleCount / 5));
+  clampOffset();
+  draw(-1);
+}, { passive: false });
+
+/* ---- Hover tooltip ---- */
+chartArea.addEventListener('mousemove', e => {
+  if (dragging) { tooltip.style.display = 'none'; return; }
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left - 42;
+  const step = barWidth + barGap;
+  const i = Math.floor(mx / step);
+  const fi = offset + i;
+  if (i < 0 || fi >= frames.length || mx < 0) { tooltip.style.display = 'none'; draw(-1); return; }
+  const f = frames[fi];
+  tooltip.style.display = 'block';
+  tooltip.textContent = `#${f.index}  Type: ${f.type}\nPTS:  ${f.pts} (${ptsToMs(f.pts).toFixed(2)} ms)\nSize: ${f.size} bytes`;
+  tooltip.style.left = Math.min(e.clientX - rect.left + 12, rect.width - 160) + 'px';
+  tooltip.style.top = (e.clientY - rect.top - 60) + 'px';
+  draw(fi);
+});
+chartArea.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; draw(-1); });
+
+/* ---- Click to show NALU panel ---- */
+let selectedFrame = -1;
+chartArea.addEventListener('click', e => {
+  if (dragMoved) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left - 42;
+  const step = barWidth + barGap;
+  const i = Math.floor(mx / step);
+  const fi = offset + i;
+  if (i < 0 || fi >= frames.length || mx < 0) return;
+  selectedFrame = fi;
+  showNaluPanel(frames[fi]);
+});
+
+function naluTagClass(type) {
+  if (currentCodec === 'h265') {
+    if (type === 32) return 'nalu-tag-other'; // VPS
+    if (type === 33) return 'nalu-tag-sps';
+    if (type === 34) return 'nalu-tag-pps';
+    if (type === 39 || type === 40) return 'nalu-tag-sei';
+    if (type <= 21) return 'nalu-tag-slice';
+    return 'nalu-tag-other';
+  }
+  if (type === 7) return 'nalu-tag-sps';
+  if (type === 8) return 'nalu-tag-pps';
+  if (type === 6) return 'nalu-tag-sei';
+  if (type === 1 || type === 5) return 'nalu-tag-slice';
+  return 'nalu-tag-other';
+}
+
+function detailToTable(detail) {
+  let html = '<table>';
+  for (const [k, v] of Object.entries(detail)) {
+    html += '<tr><td>' + k + '</td><td>' + v + '</td></tr>';
+  }
+  html += '</table>';
+  return html;
+}
+
+function showNaluPanel(frame) {
+  const list = document.getElementById('naluList');
+  const detail = document.getElementById('naluDetail');
+  detail.innerHTML = '<div class="nalu-empty">Select a NALU to view details</div>';
+  if (!frame.nalus || frame.nalus.length === 0) {
+    list.innerHTML = '<div class="nalu-empty">No NALUs in this frame</div>';
+    return;
+  }
+  let html = '<h3>Frame #' + frame.index + ' (' + frame.type + ') — ' + frame.nalus.length + ' NALUs</h3>';
+  frame.nalus.forEach((n, i) => {
+    html += '<div class="nalu-item" onclick="selectNalu(' + i + ', this)">';
+    html += '<div class="nalu-header">';
+    html += '<span class="nalu-tag ' + naluTagClass(n.type) + '">' + n.type_name + '</span>';
+    html += '<span>NAL Type ' + n.type + '</span>';
+    html += '<span class="nalu-len">' + n.length + ' bytes</span>';
+    html += '</div></div>';
+  });
+  list.innerHTML = html;
+  list._nalus = frame.nalus;
+}
+
+function selectNalu(idx, el) {
+  document.querySelectorAll('.nalu-item').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+  const n = document.getElementById('naluList')._nalus[idx];
+  const detail = document.getElementById('naluDetail');
+  let html = '<div class="nalu-detail-view">';
+  html += '<h4>' + n.type_name + ' (NAL Type ' + n.type + ', ' + n.length + ' bytes)</h4>';
+  if (n.detail) html += detailToTable(n.detail);
+  html += '</div>';
+  detail.innerHTML = html;
+}
+
+function toggleNalu() {} // no longer used
+
+/* ---- GOP-based thumbnail loading ---- */
+let loadedGops = new Set(); // cached GOP indices
+
+function gopIndexAt(frameIdx) {
+  for (let i = gops.length - 1; i >= 0; i--) {
+    if (frameIdx >= gops[i].start) return i;
+  }
+  return 0;
+}
+
+async function loadGop(gopIdx) {
+  if (loadedGops.has(gopIdx) || gopIdx < 0 || gopIdx >= gops.length) return;
+  const gop = gops[gopIdx];
+  const start = gop.start;
+  const count = gop.end - gop.start;
+  try {
+    let data;
+    if (window.__TAURI_INTERNALS__) {
+      const json = await window.__TAURI_INTERNALS__.invoke('analyze', { file: currentFile, thumbnails: true, start, count });
+      data = JSON.parse(json);
+    } else {
+      const res = await fetch(`http://localhost:9210/analyze?thumbnails=1&start=${start}&count=${count}&file=` + encodeURIComponent(currentFile));
+      if (!res.ok) throw new Error(await res.text());
+      data = await res.json();
+    }
+    for (const t of data.thumbnails) {
+      const fi = t.index;
+      if (t.thumbnail) {
+        const img = new Image();
+        img.onload = () => { thumbImages[fi] = img; drawThumbnails(-1); };
+        img.src = t.thumbnail;
+      }
+      if (t.preview) previewImages[fi] = t.preview;
+      if (frames[fi]) frames[fi].dec_type = t.dec_type;
+    }
+    loadedGops.add(gopIdx);
+    drawThumbnails(-1);
+  } catch (e) {
+    console.error('Failed to load GOP:', e);
+  }
+}
+
+async function loadCurrentGop() {
+  if (gops.length === 0) return;
+  await loadGop(currentGopIdx);
+  // If GOP is short, also load adjacent GOPs to fill screen
+  const gop = gops[currentGopIdx];
+  const thumbH = Math.min(60, (thumbCanvas.height || 150) * 0.35);
+  const cellW = Math.round(thumbH * 16/9) + 4;
+  const screenCap = Math.floor(((thumbCanvas.width || 800) - 10) / cellW);
+  let totalFrames = gop.end - gop.start;
+  let fillGop = currentGopIdx + 1;
+  while (totalFrames < screenCap && fillGop < gops.length) {
+    await loadGop(fillGop);
+    totalFrames += gops[fillGop].end - gops[fillGop].start;
+    fillGop++;
+  }
+}
+
+// Clamp offset within current GOP's displayable range
+function clampThumbOffset() {
+  const gop = gops[currentGopIdx];
+  // Find the last GOP we loaded contiguously from currentGopIdx
+  let endFrame = gop.end;
+  let g = currentGopIdx + 1;
+  while (g < gops.length && loadedGops.has(g)) {
+    endFrame = gops[g].end;
+    g++;
+  }
+  const thumbH = Math.min(60, (thumbCanvas.height || 150) * 0.35);
+  const cellW = Math.round(thumbH * 16/9) + 4;
+  const screenCap = Math.floor(((thumbCanvas.width || 800) - 10) / cellW);
+  offset = Math.max(gop.start, Math.min(offset, endFrame - screenCap));
+  offset = Math.max(gop.start, offset);
+}
+
+async function gopPagePrev() {
+  if (currentGopIdx <= 0) return;
+  currentGopIdx--;
+  offset = gops[currentGopIdx].start;
+  await loadCurrentGop();
+  clampThumbOffset();
+  drawThumbnails(-1);
+  updateGopInfo();
+}
+
+async function gopPageNext() {
+  if (currentGopIdx >= gops.length - 1) return;
+  currentGopIdx++;
+  offset = gops[currentGopIdx].start;
+  await loadCurrentGop();
+  clampThumbOffset();
+  drawThumbnails(-1);
+  updateGopInfo();
+}
+
+function updateGopInfo() {
+  const el = document.getElementById('gopInfo');
+  if (!el || gops.length === 0) return;
+  const gop = gops[currentGopIdx];
+  el.textContent = 'GOP ' + (currentGopIdx + 1) + '/' + gops.length + ' (frames ' + gop.start + '-' + (gop.end - 1) + ')';
+}
+
+/* ---- Draw thumbnails view ---- */
+function drawThumbnails(hoverIdx) {
+  const w = thumbCanvas.width;
+  const h = thumbCanvas.height;
+  thumbCtx.clearRect(0, 0, w, h);
+  if (frames.length === 0 || gops.length === 0) return;
+
+  const thumbH = Math.min(60, h * 0.35);
+  const thumbW = Math.round(thumbH * 16/9);
+  const cellW = thumbW + 4;
+  const startX = 10;
+  const thumbY = 8;
+  const barY = thumbY + thumbH + 2;
+  const barH = 4;
+  const textY = barY + barH + 12;
+  const screenCap = Math.floor((w - startX) / cellW);
+
+  for (let i = 0; i < screenCap; i++) {
+    const fi = offset + i;
+    if (fi >= frames.length) break;
+    const f = frames[fi];
+    const fType = f.dec_type || f.type;
+    const x = startX + i * cellW;
+    const isHover = fi === hoverIdx;
+
+    if (thumbImages[fi]) {
+      thumbCtx.drawImage(thumbImages[fi], x, thumbY, thumbW, thumbH);
+    } else {
+      thumbCtx.fillStyle = '#e0e0e0';
+      thumbCtx.fillRect(x, thumbY, thumbW, thumbH);
+    }
+
+    if (isHover) {
+      thumbCtx.strokeStyle = '#d63050';
+      thumbCtx.lineWidth = 2;
+      thumbCtx.strokeRect(x - 1, thumbY - 1, thumbW + 2, thumbH + 2);
+    }
+
+    thumbCtx.fillStyle = colors[fType] || '#555';
+    thumbCtx.fillRect(x, barY, thumbW, barH);
+
+    thumbCtx.fillStyle = '#333';
+    thumbCtx.font = '10px system-ui';
+    thumbCtx.textAlign = 'center';
+    const cx = x + thumbW / 2;
+    thumbCtx.fillText(fType, cx, textY);
+    thumbCtx.fillStyle = '#666';
+    thumbCtx.fillText('poc=' + f.index, cx, textY + 12);
+    thumbCtx.fillText(f.index + '/' + f.pts, cx, textY + 24);
+
+    if (i % 3 === 0) {
+      const ms = ptsToMs(f.pts);
+      const sec = ms / 1000;
+      const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+      const ss = String(Math.floor(sec % 60)).padStart(2, '0');
+      const frac = String(Math.floor(ms % 1000)).padStart(3, '0');
+      thumbCtx.fillStyle = '#999';
+      thumbCtx.fillText(mm + ':' + ss + '.' + frac, cx, textY + 36);
+    }
+  }
+
+  // Draw reference arrows below text area
+  // Arrow direction: from referencing frame -> to referenced frame
+  // e.g. P references I, arrow goes P -> I
+  const arrowY = textY + 44;
+  const visFrames = [];
+  for (let i = 0; i < screenCap; i++) {
+    const fi = offset + i;
+    if (fi >= frames.length) break;
+    const fType = frames[fi].dec_type || frames[fi].type;
+    const cx = startX + i * cellW + thumbW / 2;
+    visFrames.push({ i, fi, cx, type: fType });
+  }
+  const fiToIdx = {};
+  visFrames.forEach((v, idx) => { fiToIdx[v.fi] = idx; });
+
+  function findPrevRef(fi) {
+    for (let k = fi - 1; k >= 0 && k >= offset; k--) {
+      const t = frames[k].dec_type || frames[k].type;
+      if (t === 'I' || t === 'P') return k;
+    }
+    return -1;
+  }
+  function findNextRef(fi) {
+    for (let k = fi + 1; k < frames.length && k < offset + screenCap; k++) {
+      const t = frames[k].dec_type || frames[k].type;
+      if (t === 'I' || t === 'P') return k;
+    }
+    return -1;
+  }
+
+  // Only show arrows for the selected frame
+  const arrows = [];
+  if (selectedFrame >= 0 && fiToIdx[selectedFrame] !== undefined) {
+    const v = visFrames[fiToIdx[selectedFrame]];
+    if (v.type === 'P') {
+      const ref = findPrevRef(v.fi);
+      if (ref >= 0 && fiToIdx[ref] !== undefined)
+        arrows.push({ from: fiToIdx[v.fi], to: fiToIdx[ref] });
+    } else if (v.type === 'B') {
+      const prev = findPrevRef(v.fi);
+      const next = findNextRef(v.fi);
+      if (prev >= 0 && fiToIdx[prev] !== undefined)
+        arrows.push({ from: fiToIdx[v.fi], to: fiToIdx[prev] });
+      if (next >= 0 && fiToIdx[next] !== undefined)
+        arrows.push({ from: fiToIdx[v.fi], to: fiToIdx[next] });
+    }
+  }
+
+  // Draw right-angle arrows with stacked lanes (per-frame staggering)
+  thumbCtx.lineWidth = 1;
+  const laneH = 14;
+  const laneOccupied = [];
+  function allocLane(a, b) {
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    for (let lane = 0; ; lane++) {
+      if (!laneOccupied[lane]) laneOccupied[lane] = [];
+      if (laneOccupied[lane].every(r => hi <= r.min || lo >= r.max)) {
+        laneOccupied[lane].push({ min: lo, max: hi });
+        return lane;
+      }
+    }
+  }
+  arrows.forEach(a => {
+    const fromX = visFrames[a.from].cx;
+    const toX = visFrames[a.to].cx;
+    const lane = allocLane(a.from, a.to);
+    const y2 = arrowY + lane * laneH + laneH - 1;
+
+    thumbCtx.strokeStyle = '#d63050';
+    thumbCtx.beginPath();
+    thumbCtx.moveTo(fromX, arrowY - 2);
+    thumbCtx.lineTo(fromX, y2);
+    thumbCtx.lineTo(toX, y2);
+    thumbCtx.lineTo(toX, arrowY - 2);
+    thumbCtx.stroke();
+
+    // Arrowhead on the 'to' (referenced) end, pointing upward
+    thumbCtx.fillStyle = '#d63050';
+    thumbCtx.beginPath();
+    thumbCtx.moveTo(toX, arrowY - 2);
+    thumbCtx.lineTo(toX - 3, arrowY + 3);
+    thumbCtx.lineTo(toX + 3, arrowY + 3);
+    thumbCtx.closePath();
+    thumbCtx.fill();
+  });
+
+  updateScrollThumb();
+}
+
+/* ---- Thumbnail area interactions ---- */
+function getThumbFrameAt(e) {
+  if (gops.length === 0) return -1;
+  const rect = thumbCanvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left - 10;
+  const thumbH = Math.min(60, thumbCanvas.height * 0.35);
+  const thumbW = Math.round(thumbH * 16/9);
+  const cellW = thumbW + 4;
+  const i = Math.floor(mx / cellW);
+  const fi = offset + i;
+  if (i < 0 || fi >= frames.length || mx < 0) return -1;
+  return fi;
+}
+
+let thumbDragging = false, thumbDragMoved = false, thumbDragStartX = 0, thumbDragStartOffset = 0;
+
+thumbArea.addEventListener('mousedown', e => {
+  if (e.target.tagName === 'BUTTON') return;
+  thumbDragging = true; thumbDragMoved = false;
+  thumbDragStartX = e.clientX; thumbDragStartOffset = offset;
+  thumbArea.style.cursor = 'grabbing';
+});
+window.addEventListener('mousemove', e => {
+  if (!thumbDragging) return;
+  const thumbH = Math.min(60, thumbCanvas.height * 0.35);
+  const cellW = Math.round(thumbH * 16/9) + 4;
+  const dx = thumbDragStartX - e.clientX;
+  if (Math.abs(dx) > 3) thumbDragMoved = true;
+  offset = thumbDragStartOffset + Math.round(dx / cellW);
+  clampThumbOffset();
+  drawThumbnails(-1);
+});
+window.addEventListener('mouseup', () => {
+  thumbDragging = false;
+  thumbArea.style.cursor = '';
+});
+
+thumbArea.addEventListener('wheel', e => {
+  e.preventDefault();
+  offset += Math.sign(e.deltaY) * 3;
+  clampThumbOffset();
+  drawThumbnails(-1);
+}, { passive: false });
+
+thumbArea.addEventListener('mousemove', e => {
+  if (thumbDragging) return;
+  const fi = getThumbFrameAt(e);
+  drawThumbnails(fi);
+});
+thumbArea.addEventListener('mouseleave', () => drawThumbnails(-1));
+
+thumbArea.addEventListener('click', e => {
+  if (thumbDragMoved) return;
+  const fi = getThumbFrameAt(e);
+  if (fi < 0) return;
+  selectedFrame = fi;
+  drawThumbnails(-1);
+  showFramePreview(frames[fi]);
+});
+
+function showFramePreview(frame) {
+  const list = document.getElementById('naluList');
+  const detail = document.getElementById('naluDetail');
+  const fType = frame.dec_type || frame.type;
+  let html = '<h3>Frame #' + frame.index + ' (' + fType + ')</h3>';
+  html += '<div style="font-size:12px;color:#666;margin-top:8px;font-family:monospace">';
+  html += 'PTS: ' + frame.pts + '<br>';
+  html += 'Size: ' + frame.size + ' bytes<br>';
+  html += 'Type: ' + fType + '<br>';
+  const ms = ptsToMs(frame.pts);
+  html += 'Time: ' + (ms / 1000).toFixed(3) + 's';
+  html += '</div>';
+  list.innerHTML = html;
+  const previewSrc = previewImages[frame.index] || (thumbImages[frame.index] && thumbImages[frame.index].src);
+  if (previewSrc) {
+    detail.innerHTML = '<div class="frame-preview"><img src="' + previewSrc + '"></div>';
+  } else {
+    detail.innerHTML = '<div class="frame-preview"><span class="empty">No preview available</span></div>';
+  }
+}
+
+function jumpToPts(val) {
+  const target = parseInt(val, 10);
+  if (isNaN(target)) return;
+  let best = 0;
+  for (let i = 0; i < frames.length; i++) {
+    if (frames[i].pts <= target) best = i; else break;
+  }
+  if (viewMode === 'thumb') {
+    currentGopIdx = gopIndexAt(best);
+    offset = gops[currentGopIdx].start;
+    loadCurrentGop();
+    drawThumbnails(-1);
+    updateGopInfo();
+  } else {
+    offset = best;
+    clampOffset();
+    draw(-1);
+  }
+}
+
+/* ---- Scrollbar drag ---- */
+const scrollBar = document.getElementById('scrollBar');
+const scrollThumb = document.getElementById('scrollThumb');
+let thumbDrag = false, thumbStartX = 0, thumbStartOffset = 0;
+
+scrollThumb.addEventListener('mousedown', e => {
+  e.stopPropagation();
+  thumbDrag = true;
+  thumbStartX = e.clientX;
+  thumbStartOffset = offset;
+  scrollThumb.classList.add('active');
+});
+window.addEventListener('mousemove', e => {
+  if (!thumbDrag) return;
+  const barW = scrollBar.clientWidth;
+  const thumbW = scrollThumb.clientWidth;
+  const maxLeft = barW - thumbW;
+  if (maxLeft <= 0) return;
+  const dx = e.clientX - thumbStartX;
+  const dRatio = dx / maxLeft;
+  offset = Math.round(thumbStartOffset + dRatio * (frames.length - visibleCount));
+  if (viewMode === 'thumb') { clampThumbOffset(); drawThumbnails(-1); }
+  else { clampOffset(); draw(-1); }
+});
+window.addEventListener('mouseup', () => { thumbDrag = false; scrollThumb.classList.remove('active'); });
+
+scrollBar.addEventListener('click', e => {
+  if (thumbDrag) return;
+  const rect = scrollBar.getBoundingClientRect();
+  const ratio = (e.clientX - rect.left) / rect.width;
+  offset = Math.round(ratio * (frames.length - visibleCount));
+  if (viewMode === 'thumb') { clampThumbOffset(); drawThumbnails(-1); }
+  else { clampOffset(); draw(-1); }
+});
+
+window.addEventListener('resize', () => {
+  if (document.getElementById('bitstreamView').style.display !== 'none') onResize();
+});
+
+/* ---- Splitter drag ---- */
+const splitter = document.getElementById('splitter');
+let splitDrag = false, splitStartY = 0, splitStartH = 0;
+splitter.addEventListener('mousedown', e => {
+  e.preventDefault();
+  splitDrag = true;
+  splitStartY = e.clientY;
+  splitStartH = document.getElementById('naluPanel').offsetHeight;
+  splitter.classList.add('active');
+});
+window.addEventListener('mousemove', e => {
+  if (!splitDrag) return;
+  const dy = splitStartY - e.clientY;
+  const newH = Math.max(60, Math.min(window.innerHeight * 0.7, splitStartH + dy));
+  document.getElementById('naluPanel').style.height = newH + 'px';
+  onResize();
+});
+window.addEventListener('mouseup', () => { splitDrag = false; splitter.classList.remove('active'); });
+
+/* ---- Keyboard navigation ---- */
+window.addEventListener('keydown', e => {
+  if (document.getElementById('bitstreamView').style.display === 'none') return;
+  if (e.target.tagName === 'INPUT') return;
+  const prev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
+  const next = e.key === 'ArrowRight' || e.key === 'ArrowDown';
+  if (!prev && !next) return;
+  e.preventDefault();
+  if (selectedFrame < 0) selectedFrame = offset;
+  selectedFrame = Math.max(0, Math.min(frames.length - 1, selectedFrame + (next ? 1 : -1)));
+
+  if (viewMode === 'bar') {
+    if (selectedFrame < offset) offset = selectedFrame;
+    else if (selectedFrame >= offset + visibleCount) offset = selectedFrame - visibleCount + 1;
+    clampOffset();
+    draw(-1);
+    showNaluPanel(frames[selectedFrame]);
+  } else {
+    // In thumb mode, auto-switch GOP if stepping across boundary
+    const newGop = gopIndexAt(selectedFrame);
+    if (newGop !== currentGopIdx) {
+      currentGopIdx = newGop;
+      offset = gops[currentGopIdx].start;
+      loadCurrentGop();
+      updateGopInfo();
+    }
+    // Scroll into view within GOP
+    const thumbH = Math.min(60, (thumbCanvas.height || 150) * 0.35);
+    const cellW = Math.round(thumbH * 16/9) + 4;
+    const screenCap = Math.floor(((thumbCanvas.width || 800) - 10) / cellW);
+    if (selectedFrame < offset) offset = selectedFrame;
+    else if (selectedFrame >= offset + screenCap) offset = selectedFrame - screenCap + 1;
+    clampThumbOffset();
+    drawThumbnails(selectedFrame);
+    showFramePreview(frames[selectedFrame]);
+  }
+});
+</script>
+</body>
+</html>

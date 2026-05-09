@@ -1,6 +1,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <cstdint>
+#include <iomanip>
+#include <sstream>
 #include <vector>
 #include <string>
 
@@ -137,6 +141,15 @@ struct BitReader {
         return val;
     }
 
+    uint64_t read_bits64(int n) {
+        uint64_t val = 0;
+        for (int i = 0; i < n && bit_pos < size * 8; i++) {
+            val = (val << 1) | ((rbsp[bit_pos / 8] >> (7 - bit_pos % 8)) & 1);
+            bit_pos++;
+        }
+        return val;
+    }
+
     uint32_t read_ue() {
         int zeros = 0;
         while (bit_pos < size * 8 && read_bits(1) == 0) zeros++;
@@ -149,7 +162,306 @@ struct BitReader {
     }
 
     uint32_t read_u1() { return read_bits(1); }
+
+    void skip_bits(int n) { read_bits(n); }
+
+    bool bit_at(int pos) const {
+        if (pos < 0 || pos >= size * 8) return false;
+        return ((rbsp[pos / 8] >> (7 - pos % 8)) & 1) != 0;
+    }
+
+    bool has_more_rbsp_data() const {
+        if (bit_pos >= size * 8) return false;
+        if (!bit_at(bit_pos)) return true;
+        for (int pos = bit_pos + 1; pos < size * 8; pos++) {
+            if (bit_at(pos)) return true;
+        }
+        return false;
+    }
 };
+
+static std::string json_escape(const std::string& input) {
+    std::string out;
+    out.reserve(input.size() + 8);
+    for (unsigned char c : input) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
+struct JsonObjectBuilder {
+    std::string out{"{"};
+    bool first = true;
+
+    void key(const std::string& name) {
+        if (!first) out += ",";
+        first = false;
+        out += "\"";
+        out += json_escape(name);
+        out += "\":";
+    }
+
+    void add_uint(const std::string& name, uint64_t value) {
+        key(name);
+        out += std::to_string(value);
+    }
+
+    void add_int(const std::string& name, int64_t value) {
+        key(name);
+        out += std::to_string(value);
+    }
+
+    void add_bool(const std::string& name, bool value) {
+        key(name);
+        out += value ? "true" : "false";
+    }
+
+    void add_string(const std::string& name, const std::string& value) {
+        key(name);
+        out += "\"";
+        out += json_escape(value);
+        out += "\"";
+    }
+
+    void add_raw(const std::string& name, const std::string& raw_json) {
+        key(name);
+        out += raw_json.empty() ? "null" : raw_json;
+    }
+
+    std::string str() const {
+        return out + "}";
+    }
+};
+
+static std::string json_array_from_uints(const std::vector<uint32_t>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); i++) {
+        if (i) out += ",";
+        out += std::to_string(values[i]);
+    }
+    out += "]";
+    return out;
+}
+
+static std::string json_array_from_ints(const std::vector<int32_t>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); i++) {
+        if (i) out += ",";
+        out += std::to_string(values[i]);
+    }
+    out += "]";
+    return out;
+}
+
+static std::string json_array_from_bools(const std::vector<int>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); i++) {
+        if (i) out += ",";
+        out += values[i] ? "true" : "false";
+    }
+    out += "]";
+    return out;
+}
+
+static std::string json_array_from_raw(const std::vector<std::string>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); i++) {
+        if (i) out += ",";
+        out += values[i];
+    }
+    out += "]";
+    return out;
+}
+
+static std::string hex_string(uint64_t value, int width = 0) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << std::uppercase << std::setfill('0');
+    if (width > 0) oss << std::setw(width);
+    oss << value;
+    return oss.str();
+}
+
+static int ceil_log2_u32(uint32_t value) {
+    if (value <= 1) return 0;
+    int bits = 0;
+    uint32_t x = 1;
+    while (x < value) {
+        x <<= 1;
+        bits++;
+    }
+    return bits;
+}
+
+static std::vector<int32_t> parse_h264_scaling_list(BitReader& br, int size, bool& use_default) {
+    std::vector<int32_t> values;
+    values.reserve(size);
+    int last_scale = 8;
+    int next_scale = 8;
+    use_default = false;
+    for (int j = 0; j < size; j++) {
+        if (next_scale != 0) {
+            int delta_scale = br.read_se();
+            next_scale = (last_scale + delta_scale + 256) % 256;
+            if (j == 0 && next_scale == 0) use_default = true;
+        }
+        int scale = (next_scale == 0) ? last_scale : next_scale;
+        values.push_back(scale);
+        last_scale = scale;
+    }
+    return values;
+}
+
+struct HevcHrdCommonInfo {
+    bool valid = false;
+    bool nal_hrd_parameters_present_flag = false;
+    bool vcl_hrd_parameters_present_flag = false;
+    bool sub_pic_hrd_params_present_flag = false;
+};
+
+static std::string parse_hevc_profile_tier_level_json(BitReader& br, bool profile_present, int max_sub_layers) {
+    JsonObjectBuilder obj;
+
+    if (profile_present) {
+        uint32_t general_profile_space = br.read_bits(2);
+        bool general_tier_flag = br.read_u1() != 0;
+        uint32_t general_profile_idc = br.read_bits(5);
+        uint32_t general_profile_compatibility_flags = br.read_bits(32);
+        uint64_t general_constraint_indicator_flags = br.read_bits64(48);
+        obj.add_uint("general_profile_space", general_profile_space);
+        obj.add_bool("general_tier_flag", general_tier_flag);
+        obj.add_uint("general_profile_idc", general_profile_idc);
+        obj.add_string("general_profile_compatibility_flags_hex", hex_string(general_profile_compatibility_flags, 8));
+        obj.add_string("general_constraint_indicator_flags_hex", hex_string(general_constraint_indicator_flags, 12));
+    }
+
+    uint32_t general_level_idc = br.read_bits(8);
+    obj.add_uint("general_level_idc", general_level_idc);
+
+    std::vector<int> sub_layer_profile_present_flags;
+    std::vector<int> sub_layer_level_present_flags;
+    for (int i = 0; i < max_sub_layers - 1; i++) {
+        sub_layer_profile_present_flags.push_back(br.read_u1() ? 1 : 0);
+        sub_layer_level_present_flags.push_back(br.read_u1() ? 1 : 0);
+    }
+    if (max_sub_layers > 1) {
+        for (int i = max_sub_layers - 1; i < 8; i++) br.skip_bits(2);
+    }
+
+    std::vector<std::string> sub_layers;
+    for (int i = 0; i < max_sub_layers - 1; i++) {
+        JsonObjectBuilder sub;
+        sub.add_bool("profile_present_flag", sub_layer_profile_present_flags[i] != 0);
+        sub.add_bool("level_present_flag", sub_layer_level_present_flags[i] != 0);
+        if (sub_layer_profile_present_flags[i]) {
+            uint32_t profile_space = br.read_bits(2);
+            bool tier_flag = br.read_u1() != 0;
+            uint32_t profile_idc = br.read_bits(5);
+            uint32_t compatibility_flags = br.read_bits(32);
+            uint64_t constraint_flags = br.read_bits64(48);
+            sub.add_uint("profile_space", profile_space);
+            sub.add_bool("tier_flag", tier_flag);
+            sub.add_uint("profile_idc", profile_idc);
+            sub.add_string("profile_compatibility_flags_hex", hex_string(compatibility_flags, 8));
+            sub.add_string("constraint_indicator_flags_hex", hex_string(constraint_flags, 12));
+        }
+        if (sub_layer_level_present_flags[i]) {
+            sub.add_uint("level_idc", br.read_bits(8));
+        }
+        sub_layers.push_back(sub.str());
+    }
+
+    if (!sub_layer_profile_present_flags.empty()) {
+        obj.add_raw("sub_layer_profile_present_flags", json_array_from_bools(sub_layer_profile_present_flags));
+        obj.add_raw("sub_layer_level_present_flags", json_array_from_bools(sub_layer_level_present_flags));
+        obj.add_raw("sub_layers", json_array_from_raw(sub_layers));
+    }
+
+    return obj.str();
+}
+
+static void skip_hevc_scaling_list_data(BitReader& br) {
+    for (int size_id = 0; size_id < 4; size_id++) {
+        int matrix_count = (size_id == 3) ? 2 : 6;
+        for (int matrix_id = 0; matrix_id < matrix_count; matrix_id++) {
+            bool scaling_list_pred_mode_flag = br.read_u1() != 0;
+            if (!scaling_list_pred_mode_flag) {
+                br.read_ue();
+            } else {
+                int coef_num = std::min(64, 1 << (4 + (size_id << 1)));
+                if (size_id > 1) br.read_se();
+                for (int i = 0; i < coef_num; i++) br.read_se();
+            }
+        }
+    }
+}
+
+static HevcHrdCommonInfo skip_hevc_hrd_parameters(BitReader& br, bool common_inf_present_flag, int max_num_sub_layers_minus1) {
+    HevcHrdCommonInfo info;
+    if (common_inf_present_flag) {
+        info.valid = true;
+        info.nal_hrd_parameters_present_flag = br.read_u1() != 0;
+        info.vcl_hrd_parameters_present_flag = br.read_u1() != 0;
+        if (info.nal_hrd_parameters_present_flag || info.vcl_hrd_parameters_present_flag) {
+            info.sub_pic_hrd_params_present_flag = br.read_u1() != 0;
+            if (info.sub_pic_hrd_params_present_flag) {
+                br.skip_bits(8);
+                br.skip_bits(5);
+                br.read_u1();
+                br.skip_bits(5);
+            }
+            br.skip_bits(4);
+            br.skip_bits(4);
+            if (info.sub_pic_hrd_params_present_flag) br.skip_bits(4);
+            br.skip_bits(5);
+            br.skip_bits(5);
+            br.skip_bits(5);
+        }
+    }
+
+    for (int i = 0; i <= max_num_sub_layers_minus1; i++) {
+        bool fixed_pic_rate_general_flag = br.read_u1() != 0;
+        bool fixed_pic_rate_within_cvs_flag = fixed_pic_rate_general_flag ? true : (br.read_u1() != 0);
+        bool low_delay_hrd_flag = false;
+        uint32_t cpb_cnt_minus1 = 0;
+        if (fixed_pic_rate_within_cvs_flag) {
+            br.read_ue();
+        } else {
+            low_delay_hrd_flag = br.read_u1() != 0;
+        }
+        if (!low_delay_hrd_flag) cpb_cnt_minus1 = br.read_ue();
+        auto skip_sub_layer_hrd = [&](bool sub_pic_present) {
+            for (uint32_t j = 0; j <= cpb_cnt_minus1; j++) {
+                br.read_ue();
+                br.read_ue();
+                if (sub_pic_present) {
+                    br.read_ue();
+                    br.read_ue();
+                }
+                br.read_u1();
+            }
+        };
+        if (info.nal_hrd_parameters_present_flag) skip_sub_layer_hrd(info.sub_pic_hrd_params_present_flag);
+        if (info.vcl_hrd_parameters_present_flag) skip_sub_layer_hrd(info.sub_pic_hrd_params_present_flag);
+    }
+
+    return info;
+}
 
 static bool g_is_hevc = false; // true if H265/HEVC stream
 
@@ -282,92 +594,307 @@ static std::vector<NALUnit> parse_nalus(const uint8_t* data, int size) {
 }
 
 static void print_sps(const uint8_t* data, int size) {
-    if (size < 4) return;
+    if (size < 4) {
+        printf("{\"body_length\":%d}", size);
+        return;
+    }
+
     BitReader br(data + 1, size - 1); // skip NAL header byte
+    JsonObjectBuilder obj;
+
     uint32_t profile_idc = br.read_bits(8);
     uint32_t constraint_flags = br.read_bits(8);
     uint32_t level_idc = br.read_bits(8);
     uint32_t sps_id = br.read_ue();
-    printf("{\"profile_idc\":%u,\"constraint_flags\":%u,\"level_idc\":%u,\"sps_id\":%u",
-           profile_idc, constraint_flags, level_idc, sps_id);
+
+    obj.add_uint("profile_idc", profile_idc);
+    obj.add_string("constraint_flags_hex", hex_string(constraint_flags, 2));
+    obj.add_bool("constraint_set0_flag", (constraint_flags & 0x80) != 0);
+    obj.add_bool("constraint_set1_flag", (constraint_flags & 0x40) != 0);
+    obj.add_bool("constraint_set2_flag", (constraint_flags & 0x20) != 0);
+    obj.add_bool("constraint_set3_flag", (constraint_flags & 0x10) != 0);
+    obj.add_bool("constraint_set4_flag", (constraint_flags & 0x08) != 0);
+    obj.add_bool("constraint_set5_flag", (constraint_flags & 0x04) != 0);
+    obj.add_uint("level_idc", level_idc);
+    obj.add_uint("sps_id", sps_id);
 
     uint32_t chroma_format_idc = 1;
+    bool separate_colour_plane_flag = false;
+    uint32_t bit_depth_luma_minus8 = 0;
+    uint32_t bit_depth_chroma_minus8 = 0;
+    bool qpprime_y_zero_transform_bypass_flag = false;
+    bool seq_scaling_matrix_present_flag = false;
+    std::vector<int> seq_scaling_list_present_flags;
+    std::vector<std::string> scaling_list_entries;
+
     if (profile_idc == 100 || profile_idc == 110 || profile_idc == 122 ||
         profile_idc == 244 || profile_idc == 44 || profile_idc == 83 ||
-        profile_idc == 86 || profile_idc == 118 || profile_idc == 128) {
+        profile_idc == 86 || profile_idc == 118 || profile_idc == 128 ||
+        profile_idc == 138 || profile_idc == 139 || profile_idc == 134 ||
+        profile_idc == 135) {
         chroma_format_idc = br.read_ue();
-        printf(",\"chroma_format_idc\":%u", chroma_format_idc);
-        if (chroma_format_idc == 3) br.read_u1(); // separate_colour_plane_flag
-        uint32_t bit_depth_luma = br.read_ue() + 8;
-        uint32_t bit_depth_chroma = br.read_ue() + 8;
-        printf(",\"bit_depth_luma\":%u,\"bit_depth_chroma\":%u", bit_depth_luma, bit_depth_chroma);
-        br.read_u1(); // qpprime_y_zero_transform_bypass
-        if (br.read_u1()) { // seq_scaling_matrix_present
+        obj.add_uint("chroma_format_idc", chroma_format_idc);
+        if (chroma_format_idc == 3) {
+            separate_colour_plane_flag = br.read_u1() != 0;
+            obj.add_bool("separate_colour_plane_flag", separate_colour_plane_flag);
+        }
+        bit_depth_luma_minus8 = br.read_ue();
+        bit_depth_chroma_minus8 = br.read_ue();
+        obj.add_uint("bit_depth_luma_minus8", bit_depth_luma_minus8);
+        obj.add_uint("bit_depth_chroma_minus8", bit_depth_chroma_minus8);
+        obj.add_uint("bit_depth_luma", bit_depth_luma_minus8 + 8);
+        obj.add_uint("bit_depth_chroma", bit_depth_chroma_minus8 + 8);
+        qpprime_y_zero_transform_bypass_flag = br.read_u1() != 0;
+        obj.add_bool("qpprime_y_zero_transform_bypass_flag", qpprime_y_zero_transform_bypass_flag);
+        seq_scaling_matrix_present_flag = br.read_u1() != 0;
+        obj.add_bool("seq_scaling_matrix_present_flag", seq_scaling_matrix_present_flag);
+        if (seq_scaling_matrix_present_flag) {
             int cnt = (chroma_format_idc != 3) ? 8 : 12;
             for (int i = 0; i < cnt; i++) {
-                if (br.read_u1()) {
+                bool present = br.read_u1() != 0;
+                seq_scaling_list_present_flags.push_back(present ? 1 : 0);
+                if (present) {
+                    bool use_default = false;
                     int sz = (i < 6) ? 16 : 64;
-                    int last = 8, next = 8;
-                    for (int j = 0; j < sz; j++) {
-                        if (next != 0) next = (last + br.read_se() + 256) % 256;
-                        last = (next == 0) ? last : next;
-                    }
+                    auto values = parse_h264_scaling_list(br, sz, use_default);
+                    JsonObjectBuilder scaling;
+                    scaling.add_string("kind", i < 6 ? "4x4" : "8x8");
+                    scaling.add_uint("index", i);
+                    scaling.add_bool("use_default_scaling_matrix_flag", use_default);
+                    scaling.add_raw("values", json_array_from_ints(values));
+                    scaling_list_entries.push_back(scaling.str());
+                } else {
+                    scaling_list_entries.push_back("null");
                 }
             }
         }
+    } else {
+        obj.add_uint("chroma_format_idc", chroma_format_idc);
     }
-    uint32_t log2_max_frame_num = br.read_ue() + 4;
-    printf(",\"log2_max_frame_num\":%u", log2_max_frame_num);
-    uint32_t poc_type = br.read_ue();
-    printf(",\"pic_order_cnt_type\":%u", poc_type);
-    if (poc_type == 0) {
-        uint32_t log2_max_poc_lsb = br.read_ue() + 4;
-        printf(",\"log2_max_pic_order_cnt_lsb\":%u", log2_max_poc_lsb);
-    } else if (poc_type == 1) {
-        br.read_u1();
-        br.read_se();
-        br.read_se();
-        uint32_t n = br.read_ue();
-        for (uint32_t i = 0; i < n; i++) br.read_se();
+
+    uint32_t log2_max_frame_num_minus4 = br.read_ue();
+    uint32_t log2_max_frame_num = log2_max_frame_num_minus4 + 4;
+    uint32_t pic_order_cnt_type = br.read_ue();
+    obj.add_uint("log2_max_frame_num_minus4", log2_max_frame_num_minus4);
+    obj.add_uint("log2_max_frame_num", log2_max_frame_num);
+    obj.add_uint("pic_order_cnt_type", pic_order_cnt_type);
+
+    if (pic_order_cnt_type == 0) {
+        uint32_t log2_max_pic_order_cnt_lsb_minus4 = br.read_ue();
+        obj.add_uint("log2_max_pic_order_cnt_lsb_minus4", log2_max_pic_order_cnt_lsb_minus4);
+        obj.add_uint("log2_max_pic_order_cnt_lsb", log2_max_pic_order_cnt_lsb_minus4 + 4);
+    } else if (pic_order_cnt_type == 1) {
+        bool delta_pic_order_always_zero_flag = br.read_u1() != 0;
+        int32_t offset_for_non_ref_pic = br.read_se();
+        int32_t offset_for_top_to_bottom_field = br.read_se();
+        uint32_t num_ref_frames_in_pic_order_cnt_cycle = br.read_ue();
+        std::vector<int32_t> offset_for_ref_frame;
+        for (uint32_t i = 0; i < num_ref_frames_in_pic_order_cnt_cycle; i++) {
+            offset_for_ref_frame.push_back(br.read_se());
+        }
+        obj.add_bool("delta_pic_order_always_zero_flag", delta_pic_order_always_zero_flag);
+        obj.add_int("offset_for_non_ref_pic", offset_for_non_ref_pic);
+        obj.add_int("offset_for_top_to_bottom_field", offset_for_top_to_bottom_field);
+        obj.add_uint("num_ref_frames_in_pic_order_cnt_cycle", num_ref_frames_in_pic_order_cnt_cycle);
+        obj.add_raw("offset_for_ref_frame", json_array_from_ints(offset_for_ref_frame));
     }
-    uint32_t max_ref = br.read_ue();
-    uint32_t gaps = br.read_u1();
-    uint32_t mb_w = br.read_ue() + 1;
-    uint32_t mb_h = br.read_ue() + 1;
-    uint32_t frame_mbs_only = br.read_u1();
-    printf(",\"max_num_ref_frames\":%u,\"gaps_in_frame_num_allowed\":%u", max_ref, gaps);
-    printf(",\"pic_width_in_mbs\":%u,\"pic_height_in_map_units\":%u", mb_w, mb_h);
-    printf(",\"frame_mbs_only_flag\":%u", frame_mbs_only);
-    printf(",\"width\":%u,\"height\":%u}", mb_w * 16, mb_h * 16 * (2 - frame_mbs_only));
+
+    uint32_t max_num_ref_frames = br.read_ue();
+    bool gaps_in_frame_num_value_allowed_flag = br.read_u1() != 0;
+    uint32_t pic_width_in_mbs_minus1 = br.read_ue();
+    uint32_t pic_height_in_map_units_minus1 = br.read_ue();
+    bool frame_mbs_only_flag = br.read_u1() != 0;
+    bool mb_adaptive_frame_field_flag = false;
+    if (!frame_mbs_only_flag) mb_adaptive_frame_field_flag = br.read_u1() != 0;
+    bool direct_8x8_inference_flag = br.read_u1() != 0;
+    bool frame_cropping_flag = br.read_u1() != 0;
+    uint32_t frame_crop_left_offset = 0;
+    uint32_t frame_crop_right_offset = 0;
+    uint32_t frame_crop_top_offset = 0;
+    uint32_t frame_crop_bottom_offset = 0;
+    if (frame_cropping_flag) {
+        frame_crop_left_offset = br.read_ue();
+        frame_crop_right_offset = br.read_ue();
+        frame_crop_top_offset = br.read_ue();
+        frame_crop_bottom_offset = br.read_ue();
+    }
+
+    bool vui_parameters_present_flag = br.read_u1() != 0;
+
+    uint32_t crop_unit_x = 1;
+    uint32_t crop_unit_y = 2 - (frame_mbs_only_flag ? 1 : 0);
+    if (chroma_format_idc == 1) {
+        crop_unit_x = 2;
+        crop_unit_y = 2 * (2 - (frame_mbs_only_flag ? 1 : 0));
+    } else if (chroma_format_idc == 2) {
+        crop_unit_x = 2;
+        crop_unit_y = 1 * (2 - (frame_mbs_only_flag ? 1 : 0));
+    } else if (chroma_format_idc == 3) {
+        crop_unit_x = 1;
+        crop_unit_y = 1 * (2 - (frame_mbs_only_flag ? 1 : 0));
+    }
+
+    uint32_t coded_width = (pic_width_in_mbs_minus1 + 1) * 16;
+    uint32_t coded_height = (pic_height_in_map_units_minus1 + 1) * 16 * (2 - (frame_mbs_only_flag ? 1 : 0));
+    uint32_t width = coded_width;
+    uint32_t height = coded_height;
+    if (frame_cropping_flag) {
+        uint32_t crop_w = (frame_crop_left_offset + frame_crop_right_offset) * crop_unit_x;
+        uint32_t crop_h = (frame_crop_top_offset + frame_crop_bottom_offset) * crop_unit_y;
+        width = (coded_width > crop_w) ? (coded_width - crop_w) : 0;
+        height = (coded_height > crop_h) ? (coded_height - crop_h) : 0;
+    }
+
+    obj.add_uint("max_num_ref_frames", max_num_ref_frames);
+    obj.add_bool("gaps_in_frame_num_value_allowed_flag", gaps_in_frame_num_value_allowed_flag);
+    obj.add_uint("pic_width_in_mbs_minus1", pic_width_in_mbs_minus1);
+    obj.add_uint("pic_width_in_mbs", pic_width_in_mbs_minus1 + 1);
+    obj.add_uint("pic_height_in_map_units_minus1", pic_height_in_map_units_minus1);
+    obj.add_uint("pic_height_in_map_units", pic_height_in_map_units_minus1 + 1);
+    obj.add_bool("frame_mbs_only_flag", frame_mbs_only_flag);
+    if (!frame_mbs_only_flag) obj.add_bool("mb_adaptive_frame_field_flag", mb_adaptive_frame_field_flag);
+    obj.add_bool("direct_8x8_inference_flag", direct_8x8_inference_flag);
+    obj.add_bool("frame_cropping_flag", frame_cropping_flag);
+    if (frame_cropping_flag) {
+        obj.add_uint("frame_crop_left_offset", frame_crop_left_offset);
+        obj.add_uint("frame_crop_right_offset", frame_crop_right_offset);
+        obj.add_uint("frame_crop_top_offset", frame_crop_top_offset);
+        obj.add_uint("frame_crop_bottom_offset", frame_crop_bottom_offset);
+        obj.add_uint("crop_unit_x", crop_unit_x);
+        obj.add_uint("crop_unit_y", crop_unit_y);
+    }
+    obj.add_bool("vui_parameters_present_flag", vui_parameters_present_flag);
+    obj.add_uint("coded_width", coded_width);
+    obj.add_uint("coded_height", coded_height);
+    obj.add_uint("width", width);
+    obj.add_uint("height", height);
+    obj.add_uint("body_length", size);
+
+    if (!seq_scaling_list_present_flags.empty()) {
+        obj.add_raw("seq_scaling_list_present_flags", json_array_from_bools(seq_scaling_list_present_flags));
+        obj.add_raw("scaling_lists", json_array_from_raw(scaling_list_entries));
+    }
+
+    printf("%s", obj.str().c_str());
 }
 
 static void print_pps(const uint8_t* data, int size) {
-    if (size < 2) return;
+    if (size < 2) {
+        printf("{\"body_length\":%d}", size);
+        return;
+    }
+
     BitReader br(data + 1, size - 1);
+    JsonObjectBuilder obj;
+
     uint32_t pps_id = br.read_ue();
     uint32_t sps_id = br.read_ue();
-    uint32_t entropy = br.read_u1();
-    uint32_t bottom_field_poc = br.read_u1();
-    uint32_t num_slice_groups = br.read_ue() + 1;
-    printf("{\"pps_id\":%u,\"sps_id\":%u,\"entropy_coding_mode\":\"%s\"",
-           pps_id, sps_id, entropy ? "CABAC" : "CAVLC");
-    printf(",\"bottom_field_pic_order_in_frame_present\":%u", bottom_field_poc);
-    printf(",\"num_slice_groups\":%u", num_slice_groups);
-    // skip slice group details if > 1
-    if (num_slice_groups <= 1 && br.available() > 20) {
-        uint32_t num_ref_l0 = br.read_ue() + 1;
-        uint32_t num_ref_l1 = br.read_ue() + 1;
-        uint32_t weighted_pred = br.read_u1();
-        uint32_t weighted_bipred = br.read_bits(2);
-        int32_t init_qp = br.read_se() + 26;
-        int32_t init_qs = br.read_se() + 26;
-        int32_t chroma_qp_offset = br.read_se();
-        printf(",\"num_ref_idx_l0\":%u,\"num_ref_idx_l1\":%u", num_ref_l0, num_ref_l1);
-        printf(",\"weighted_pred_flag\":%u,\"weighted_bipred_idc\":%u", weighted_pred, weighted_bipred);
-        printf(",\"pic_init_qp\":%d,\"pic_init_qs\":%d,\"chroma_qp_index_offset\":%d",
-               init_qp, init_qs, chroma_qp_offset);
+    bool entropy_coding_mode_flag = br.read_u1() != 0;
+    bool bottom_field_pic_order_in_frame_present_flag = br.read_u1() != 0;
+    uint32_t num_slice_groups_minus1 = br.read_ue();
+    uint32_t num_slice_groups = num_slice_groups_minus1 + 1;
+
+    obj.add_uint("pps_id", pps_id);
+    obj.add_uint("sps_id", sps_id);
+    obj.add_bool("entropy_coding_mode_flag", entropy_coding_mode_flag);
+    obj.add_string("entropy_coding_mode", entropy_coding_mode_flag ? "CABAC" : "CAVLC");
+    obj.add_bool("bottom_field_pic_order_in_frame_present_flag", bottom_field_pic_order_in_frame_present_flag);
+    obj.add_uint("num_slice_groups_minus1", num_slice_groups_minus1);
+    obj.add_uint("num_slice_groups", num_slice_groups);
+
+    if (num_slice_groups_minus1 > 0) {
+        uint32_t slice_group_map_type = br.read_ue();
+        obj.add_uint("slice_group_map_type", slice_group_map_type);
+        if (slice_group_map_type == 0) {
+            std::vector<uint32_t> run_length_minus1;
+            for (uint32_t i = 0; i <= num_slice_groups_minus1; i++) run_length_minus1.push_back(br.read_ue());
+            obj.add_raw("run_length_minus1", json_array_from_uints(run_length_minus1));
+        } else if (slice_group_map_type == 2) {
+            std::vector<std::string> top_left_bottom_right;
+            for (uint32_t i = 0; i < num_slice_groups_minus1; i++) {
+                JsonObjectBuilder pair;
+                pair.add_uint("top_left", br.read_ue());
+                pair.add_uint("bottom_right", br.read_ue());
+                top_left_bottom_right.push_back(pair.str());
+            }
+            obj.add_raw("slice_group_rectangles", json_array_from_raw(top_left_bottom_right));
+        } else if (slice_group_map_type == 3 || slice_group_map_type == 4 || slice_group_map_type == 5) {
+            obj.add_bool("slice_group_change_direction_flag", br.read_u1() != 0);
+            obj.add_uint("slice_group_change_rate_minus1", br.read_ue());
+        } else if (slice_group_map_type == 6) {
+            uint32_t pic_size_in_map_units_minus1 = br.read_ue();
+            int bits = ceil_log2_u32(num_slice_groups);
+            std::vector<uint32_t> slice_group_id;
+            for (uint32_t i = 0; i <= pic_size_in_map_units_minus1; i++) {
+                slice_group_id.push_back(bits > 0 ? br.read_bits(bits) : 0);
+            }
+            obj.add_uint("pic_size_in_map_units_minus1", pic_size_in_map_units_minus1);
+            obj.add_raw("slice_group_id", json_array_from_uints(slice_group_id));
+        }
     }
-    printf("}");
+
+    uint32_t num_ref_idx_l0_default_active_minus1 = br.read_ue();
+    uint32_t num_ref_idx_l1_default_active_minus1 = br.read_ue();
+    bool weighted_pred_flag = br.read_u1() != 0;
+    uint32_t weighted_bipred_idc = br.read_bits(2);
+    int32_t pic_init_qp_minus26 = br.read_se();
+    int32_t pic_init_qs_minus26 = br.read_se();
+    int32_t chroma_qp_index_offset = br.read_se();
+    bool deblocking_filter_control_present_flag = br.read_u1() != 0;
+    bool constrained_intra_pred_flag = br.read_u1() != 0;
+    bool redundant_pic_cnt_present_flag = br.read_u1() != 0;
+
+    obj.add_uint("num_ref_idx_l0_default_active_minus1", num_ref_idx_l0_default_active_minus1);
+    obj.add_uint("num_ref_idx_l1_default_active_minus1", num_ref_idx_l1_default_active_minus1);
+    obj.add_uint("num_ref_idx_l0", num_ref_idx_l0_default_active_minus1 + 1);
+    obj.add_uint("num_ref_idx_l1", num_ref_idx_l1_default_active_minus1 + 1);
+    obj.add_bool("weighted_pred_flag", weighted_pred_flag);
+    obj.add_uint("weighted_bipred_idc", weighted_bipred_idc);
+    obj.add_int("pic_init_qp_minus26", pic_init_qp_minus26);
+    obj.add_int("pic_init_qs_minus26", pic_init_qs_minus26);
+    obj.add_int("pic_init_qp", pic_init_qp_minus26 + 26);
+    obj.add_int("pic_init_qs", pic_init_qs_minus26 + 26);
+    obj.add_int("chroma_qp_index_offset", chroma_qp_index_offset);
+    obj.add_bool("deblocking_filter_control_present_flag", deblocking_filter_control_present_flag);
+    obj.add_bool("constrained_intra_pred_flag", constrained_intra_pred_flag);
+    obj.add_bool("redundant_pic_cnt_present_flag", redundant_pic_cnt_present_flag);
+
+    if (br.has_more_rbsp_data()) {
+        bool transform_8x8_mode_flag = br.read_u1() != 0;
+        bool pic_scaling_matrix_present_flag = br.read_u1() != 0;
+        int32_t second_chroma_qp_index_offset = chroma_qp_index_offset;
+        obj.add_bool("transform_8x8_mode_flag", transform_8x8_mode_flag);
+        obj.add_bool("pic_scaling_matrix_present_flag", pic_scaling_matrix_present_flag);
+        if (pic_scaling_matrix_present_flag) {
+            int list_count = 6 + (transform_8x8_mode_flag ? 2 : 0);
+            std::vector<int> pic_scaling_list_present_flags;
+            std::vector<std::string> scaling_list_entries;
+            for (int i = 0; i < list_count; i++) {
+                bool present = br.read_u1() != 0;
+                pic_scaling_list_present_flags.push_back(present ? 1 : 0);
+                if (present) {
+                    bool use_default = false;
+                    int sz = (i < 6) ? 16 : 64;
+                    auto values = parse_h264_scaling_list(br, sz, use_default);
+                    JsonObjectBuilder scaling;
+                    scaling.add_string("kind", i < 6 ? "4x4" : "8x8");
+                    scaling.add_uint("index", i);
+                    scaling.add_bool("use_default_scaling_matrix_flag", use_default);
+                    scaling.add_raw("values", json_array_from_ints(values));
+                    scaling_list_entries.push_back(scaling.str());
+                } else {
+                    scaling_list_entries.push_back("null");
+                }
+            }
+            obj.add_raw("pic_scaling_list_present_flags", json_array_from_bools(pic_scaling_list_present_flags));
+            obj.add_raw("pic_scaling_lists", json_array_from_raw(scaling_list_entries));
+        }
+        second_chroma_qp_index_offset = br.read_se();
+        obj.add_int("second_chroma_qp_index_offset", second_chroma_qp_index_offset);
+    }
+
+    obj.add_uint("body_length", size);
+    printf("%s", obj.str().c_str());
 }
 
 static void print_slice_header(const uint8_t* data, int size) {
@@ -397,71 +924,522 @@ static void print_sei(const uint8_t* data, int size) {
 static void print_hevc_vps(const uint8_t* data, int size) {
     if (size < 4) { printf("{\"body_length\":%d}", size); return; }
     BitReader br(data + 2, size - 2); // skip 2-byte NAL header
-    uint32_t vps_id = br.read_bits(4);
-    br.read_bits(2); // vps_base_layer_internal_flag, vps_base_layer_available_flag
-    uint32_t max_layers = br.read_bits(6) + 1;
-    uint32_t max_sub_layers = br.read_bits(3) + 1;
-    uint32_t temporal_id_nesting = br.read_u1();
-    printf("{\"vps_id\":%u,\"max_layers\":%u,\"max_sub_layers\":%u,\"temporal_id_nesting_flag\":%u}",
-           vps_id, max_layers, max_sub_layers, temporal_id_nesting);
-}
+    JsonObjectBuilder obj;
 
-static void skip_profile_tier_level(BitReader& br, bool profile_present, int max_sub_layers) {
-    if (profile_present) {
-        br.read_bits(2); // general_profile_space
-        br.read_u1();    // general_tier_flag
-        br.read_bits(5); // general_profile_idc
-        br.read_bits(32); // general_profile_compatibility_flags
-        br.read_bits(32); br.read_bits(16); // general_constraint_indicator_flags (48 bits)
+    uint32_t vps_video_parameter_set_id = br.read_bits(4);
+    bool vps_base_layer_internal_flag = br.read_u1() != 0;
+    bool vps_base_layer_available_flag = br.read_u1() != 0;
+    uint32_t vps_max_layers_minus1 = br.read_bits(6);
+    uint32_t vps_max_sub_layers_minus1 = br.read_bits(3);
+    bool vps_temporal_id_nesting_flag = br.read_u1() != 0;
+    uint32_t vps_reserved_0xffff_16bits = br.read_bits(16);
+
+    obj.add_uint("vps_id", vps_video_parameter_set_id);
+    obj.add_bool("vps_base_layer_internal_flag", vps_base_layer_internal_flag);
+    obj.add_bool("vps_base_layer_available_flag", vps_base_layer_available_flag);
+    obj.add_uint("vps_max_layers_minus1", vps_max_layers_minus1);
+    obj.add_uint("max_layers", vps_max_layers_minus1 + 1);
+    obj.add_uint("vps_max_sub_layers_minus1", vps_max_sub_layers_minus1);
+    obj.add_uint("max_sub_layers", vps_max_sub_layers_minus1 + 1);
+    obj.add_bool("vps_temporal_id_nesting_flag", vps_temporal_id_nesting_flag);
+    obj.add_string("vps_reserved_0xffff_16bits_hex", hex_string(vps_reserved_0xffff_16bits, 4));
+    obj.add_raw("profile_tier_level", parse_hevc_profile_tier_level_json(br, true, vps_max_sub_layers_minus1 + 1));
+
+    bool vps_sub_layer_ordering_info_present_flag = br.read_u1() != 0;
+    obj.add_bool("vps_sub_layer_ordering_info_present_flag", vps_sub_layer_ordering_info_present_flag);
+    std::vector<std::string> sub_layer_ordering;
+    int ordering_start = vps_sub_layer_ordering_info_present_flag ? 0 : vps_max_sub_layers_minus1;
+    for (int i = ordering_start; i <= (int)vps_max_sub_layers_minus1; i++) {
+        JsonObjectBuilder entry;
+        entry.add_uint("vps_max_dec_pic_buffering_minus1", br.read_ue());
+        entry.add_uint("vps_max_num_reorder_pics", br.read_ue());
+        entry.add_uint("vps_max_latency_increase_plus1", br.read_ue());
+        sub_layer_ordering.push_back(entry.str());
     }
-    br.read_bits(8); // general_level_idc
-    std::vector<bool> sub_layer_profile(max_sub_layers - 1);
-    std::vector<bool> sub_layer_level(max_sub_layers - 1);
-    for (int i = 0; i < max_sub_layers - 1; i++) {
-        sub_layer_profile[i] = br.read_u1();
-        sub_layer_level[i] = br.read_u1();
+    obj.add_raw("sub_layer_ordering_info", json_array_from_raw(sub_layer_ordering));
+
+    uint32_t vps_max_layer_id = br.read_bits(6);
+    uint32_t vps_num_layer_sets_minus1 = br.read_ue();
+    obj.add_uint("vps_max_layer_id", vps_max_layer_id);
+    obj.add_uint("vps_num_layer_sets_minus1", vps_num_layer_sets_minus1);
+    std::vector<std::string> layer_sets;
+    for (uint32_t i = 1; i <= vps_num_layer_sets_minus1; i++) {
+        std::vector<int> layer_id_included_flags;
+        for (uint32_t j = 0; j <= vps_max_layer_id; j++) layer_id_included_flags.push_back(br.read_u1() ? 1 : 0);
+        JsonObjectBuilder layer_set;
+        layer_set.add_uint("layer_set_id", i);
+        layer_set.add_raw("layer_id_included_flags", json_array_from_bools(layer_id_included_flags));
+        layer_sets.push_back(layer_set.str());
     }
-    if (max_sub_layers > 1)
-        for (int i = max_sub_layers - 1; i < 8; i++) br.read_bits(2);
-    for (int i = 0; i < max_sub_layers - 1; i++) {
-        if (sub_layer_profile[i]) { br.read_bits(2); br.read_u1(); br.read_bits(5); br.read_bits(32); br.read_bits(32); br.read_bits(16); }
-        if (sub_layer_level[i]) br.read_bits(8);
+    if (!layer_sets.empty()) obj.add_raw("layer_sets", json_array_from_raw(layer_sets));
+
+    bool vps_timing_info_present_flag = br.read_u1() != 0;
+    obj.add_bool("vps_timing_info_present_flag", vps_timing_info_present_flag);
+    uint32_t vps_num_units_in_tick = 0;
+    uint32_t vps_time_scale = 0;
+    bool vps_poc_proportional_to_timing_flag = false;
+    uint32_t vps_num_ticks_poc_diff_one_minus1 = 0;
+    uint32_t vps_num_hrd_parameters = 0;
+    if (vps_timing_info_present_flag) {
+        vps_num_units_in_tick = br.read_bits(32);
+        vps_time_scale = br.read_bits(32);
+        vps_poc_proportional_to_timing_flag = br.read_u1() != 0;
+        if (vps_poc_proportional_to_timing_flag) vps_num_ticks_poc_diff_one_minus1 = br.read_ue();
+        vps_num_hrd_parameters = br.read_ue();
+        obj.add_uint("vps_num_units_in_tick", vps_num_units_in_tick);
+        obj.add_uint("vps_time_scale", vps_time_scale);
+        obj.add_bool("vps_poc_proportional_to_timing_flag", vps_poc_proportional_to_timing_flag);
+        if (vps_poc_proportional_to_timing_flag) obj.add_uint("vps_num_ticks_poc_diff_one_minus1", vps_num_ticks_poc_diff_one_minus1);
+        obj.add_uint("vps_num_hrd_parameters", vps_num_hrd_parameters);
+
+        std::vector<std::string> hrd_parameters;
+        for (uint32_t i = 0; i < vps_num_hrd_parameters; i++) {
+            uint32_t hrd_layer_set_idx = br.read_ue();
+            bool cprms_present_flag = (i == 0) ? true : (br.read_u1() != 0);
+            auto hrd = skip_hevc_hrd_parameters(br, cprms_present_flag, vps_max_sub_layers_minus1);
+            JsonObjectBuilder hrd_obj;
+            hrd_obj.add_uint("hrd_layer_set_idx", hrd_layer_set_idx);
+            hrd_obj.add_bool("cprms_present_flag", cprms_present_flag);
+            if (hrd.valid || cprms_present_flag) {
+                hrd_obj.add_bool("nal_hrd_parameters_present_flag", hrd.nal_hrd_parameters_present_flag);
+                hrd_obj.add_bool("vcl_hrd_parameters_present_flag", hrd.vcl_hrd_parameters_present_flag);
+                hrd_obj.add_bool("sub_pic_hrd_params_present_flag", hrd.sub_pic_hrd_params_present_flag);
+            }
+            hrd_parameters.push_back(hrd_obj.str());
+        }
+        if (!hrd_parameters.empty()) obj.add_raw("hrd_parameters", json_array_from_raw(hrd_parameters));
     }
+
+    bool vps_extension_flag = br.read_u1() != 0;
+    obj.add_bool("vps_extension_flag", vps_extension_flag);
+    obj.add_uint("body_length", size);
+    printf("%s", obj.str().c_str());
 }
 
 static void print_hevc_sps(const uint8_t* data, int size) {
     if (size < 4) { printf("{\"body_length\":%d}", size); return; }
     BitReader br(data + 2, size - 2);
-    uint32_t vps_id = br.read_bits(4);
-    uint32_t max_sub_layers = br.read_bits(3) + 1;
-    uint32_t temporal_id_nesting = br.read_u1();
-    skip_profile_tier_level(br, true, max_sub_layers);
-    uint32_t sps_id = br.read_ue();
+    JsonObjectBuilder obj;
+
+    uint32_t sps_video_parameter_set_id = br.read_bits(4);
+    uint32_t sps_max_sub_layers_minus1 = br.read_bits(3);
+    bool sps_temporal_id_nesting_flag = br.read_u1() != 0;
+    obj.add_uint("sps_video_parameter_set_id", sps_video_parameter_set_id);
+    obj.add_uint("sps_max_sub_layers_minus1", sps_max_sub_layers_minus1);
+    obj.add_uint("max_sub_layers", sps_max_sub_layers_minus1 + 1);
+    obj.add_bool("sps_temporal_id_nesting_flag", sps_temporal_id_nesting_flag);
+    obj.add_raw("profile_tier_level", parse_hevc_profile_tier_level_json(br, true, sps_max_sub_layers_minus1 + 1));
+
+    uint32_t sps_seq_parameter_set_id = br.read_ue();
     uint32_t chroma_format_idc = br.read_ue();
-    printf("{\"vps_id\":%u,\"sps_id\":%u,\"max_sub_layers\":%u,\"chroma_format_idc\":%u",
-           vps_id, sps_id, max_sub_layers, chroma_format_idc);
-    if (chroma_format_idc == 3) br.read_u1(); // separate_colour_plane_flag
-    uint32_t pic_w = br.read_ue();
-    uint32_t pic_h = br.read_ue();
-    printf(",\"width\":%u,\"height\":%u}", pic_w, pic_h);
+    bool separate_colour_plane_flag = false;
+    if (chroma_format_idc == 3) separate_colour_plane_flag = br.read_u1() != 0;
+    uint32_t pic_width_in_luma_samples = br.read_ue();
+    uint32_t pic_height_in_luma_samples = br.read_ue();
+    bool conformance_window_flag = br.read_u1() != 0;
+    uint32_t conf_win_left_offset = 0;
+    uint32_t conf_win_right_offset = 0;
+    uint32_t conf_win_top_offset = 0;
+    uint32_t conf_win_bottom_offset = 0;
+    if (conformance_window_flag) {
+        conf_win_left_offset = br.read_ue();
+        conf_win_right_offset = br.read_ue();
+        conf_win_top_offset = br.read_ue();
+        conf_win_bottom_offset = br.read_ue();
+    }
+    uint32_t bit_depth_luma_minus8 = br.read_ue();
+    uint32_t bit_depth_chroma_minus8 = br.read_ue();
+    uint32_t log2_max_pic_order_cnt_lsb_minus4 = br.read_ue();
+    bool sps_sub_layer_ordering_info_present_flag = br.read_u1() != 0;
+
+    std::vector<std::string> sub_layer_ordering;
+    int ordering_start = sps_sub_layer_ordering_info_present_flag ? 0 : sps_max_sub_layers_minus1;
+    for (int i = ordering_start; i <= (int)sps_max_sub_layers_minus1; i++) {
+        JsonObjectBuilder entry;
+        entry.add_uint("max_dec_pic_buffering_minus1", br.read_ue());
+        entry.add_uint("max_num_reorder_pics", br.read_ue());
+        entry.add_uint("max_latency_increase_plus1", br.read_ue());
+        sub_layer_ordering.push_back(entry.str());
+    }
+
+    uint32_t log2_min_luma_coding_block_size_minus3 = br.read_ue();
+    uint32_t log2_diff_max_min_luma_coding_block_size = br.read_ue();
+    uint32_t log2_min_luma_transform_block_size_minus2 = br.read_ue();
+    uint32_t log2_diff_max_min_luma_transform_block_size = br.read_ue();
+    uint32_t max_transform_hierarchy_depth_inter = br.read_ue();
+    uint32_t max_transform_hierarchy_depth_intra = br.read_ue();
+    bool scaling_list_enabled_flag = br.read_u1() != 0;
+    bool sps_scaling_list_data_present_flag = false;
+    if (scaling_list_enabled_flag) {
+        sps_scaling_list_data_present_flag = br.read_u1() != 0;
+        if (sps_scaling_list_data_present_flag) skip_hevc_scaling_list_data(br);
+    }
+    bool amp_enabled_flag = br.read_u1() != 0;
+    bool sample_adaptive_offset_enabled_flag = br.read_u1() != 0;
+    bool pcm_enabled_flag = br.read_u1() != 0;
+    uint32_t pcm_sample_bit_depth_luma_minus1 = 0;
+    uint32_t pcm_sample_bit_depth_chroma_minus1 = 0;
+    uint32_t log2_min_pcm_luma_coding_block_size_minus3 = 0;
+    uint32_t log2_diff_max_min_pcm_luma_coding_block_size = 0;
+    bool pcm_loop_filter_disabled_flag = false;
+    if (pcm_enabled_flag) {
+        pcm_sample_bit_depth_luma_minus1 = br.read_bits(4);
+        pcm_sample_bit_depth_chroma_minus1 = br.read_bits(4);
+        log2_min_pcm_luma_coding_block_size_minus3 = br.read_ue();
+        log2_diff_max_min_pcm_luma_coding_block_size = br.read_ue();
+        pcm_loop_filter_disabled_flag = br.read_u1() != 0;
+    }
+    uint32_t num_short_term_ref_pic_sets = br.read_ue();
+    // Keep current implementation pragmatic: expose count, skip full RPS expansion for now.
+    for (uint32_t i = 0; i < num_short_term_ref_pic_sets; i++) {
+        bool inter_ref_pic_set_prediction_flag = false;
+        if (i != 0) inter_ref_pic_set_prediction_flag = br.read_u1() != 0;
+        if (inter_ref_pic_set_prediction_flag) {
+            br.read_u1();
+            br.read_ue();
+            uint32_t num_delta_pocs = 0;
+            for (uint32_t j = 0; j <= num_delta_pocs; j++) {
+                br.read_u1();
+                br.read_u1();
+            }
+        } else {
+            uint32_t num_negative_pics = br.read_ue();
+            uint32_t num_positive_pics = br.read_ue();
+            for (uint32_t j = 0; j < num_negative_pics; j++) {
+                br.read_ue();
+                br.read_u1();
+            }
+            for (uint32_t j = 0; j < num_positive_pics; j++) {
+                br.read_ue();
+                br.read_u1();
+            }
+        }
+    }
+    bool long_term_ref_pics_present_flag = br.read_u1() != 0;
+    uint32_t num_long_term_ref_pics_sps = 0;
+    if (long_term_ref_pics_present_flag) {
+        num_long_term_ref_pics_sps = br.read_ue();
+        int lt_bits = log2_max_pic_order_cnt_lsb_minus4 + 4;
+        for (uint32_t i = 0; i < num_long_term_ref_pics_sps; i++) {
+            br.read_bits(lt_bits);
+            br.read_u1();
+        }
+    }
+    bool sps_temporal_mvp_enabled_flag = br.read_u1() != 0;
+    bool strong_intra_smoothing_enabled_flag = br.read_u1() != 0;
+    bool vui_parameters_present_flag = br.read_u1() != 0;
+    bool aspect_ratio_info_present_flag = false;
+    bool overscan_info_present_flag = false;
+    bool video_signal_type_present_flag = false;
+    bool chroma_loc_info_present_flag = false;
+    bool neutral_chroma_indication_flag = false;
+    bool field_seq_flag = false;
+    bool frame_field_info_present_flag = false;
+    bool default_display_window_flag = false;
+    bool vui_timing_info_present_flag = false;
+    bool vui_poc_proportional_to_timing_flag = false;
+    bool vui_hrd_parameters_present_flag = false;
+    bool bitstream_restriction_flag = false;
+    uint32_t aspect_ratio_idc = 0;
+    uint32_t sar_width = 0;
+    uint32_t sar_height = 0;
+    uint32_t video_format = 0;
+    bool video_full_range_flag = false;
+    bool colour_description_present_flag = false;
+    uint32_t colour_primaries = 0;
+    uint32_t transfer_characteristics = 0;
+    uint32_t matrix_coeffs = 0;
+    uint32_t chroma_sample_loc_type_top_field = 0;
+    uint32_t chroma_sample_loc_type_bottom_field = 0;
+    uint32_t def_disp_win_left_offset = 0;
+    uint32_t def_disp_win_right_offset = 0;
+    uint32_t def_disp_win_top_offset = 0;
+    uint32_t def_disp_win_bottom_offset = 0;
+    uint32_t vui_num_units_in_tick = 0;
+    uint32_t vui_time_scale = 0;
+    uint32_t vui_num_ticks_poc_diff_one_minus1 = 0;
+    if (vui_parameters_present_flag) {
+        aspect_ratio_info_present_flag = br.read_u1() != 0;
+        if (aspect_ratio_info_present_flag) {
+            aspect_ratio_idc = br.read_bits(8);
+            if (aspect_ratio_idc == 255) {
+                sar_width = br.read_bits(16);
+                sar_height = br.read_bits(16);
+            }
+        }
+        overscan_info_present_flag = br.read_u1() != 0;
+        if (overscan_info_present_flag) br.read_u1();
+        video_signal_type_present_flag = br.read_u1() != 0;
+        if (video_signal_type_present_flag) {
+            video_format = br.read_bits(3);
+            video_full_range_flag = br.read_u1() != 0;
+            colour_description_present_flag = br.read_u1() != 0;
+            if (colour_description_present_flag) {
+                colour_primaries = br.read_bits(8);
+                transfer_characteristics = br.read_bits(8);
+                matrix_coeffs = br.read_bits(8);
+            }
+        }
+        chroma_loc_info_present_flag = br.read_u1() != 0;
+        if (chroma_loc_info_present_flag) {
+            chroma_sample_loc_type_top_field = br.read_ue();
+            chroma_sample_loc_type_bottom_field = br.read_ue();
+        }
+        neutral_chroma_indication_flag = br.read_u1() != 0;
+        field_seq_flag = br.read_u1() != 0;
+        frame_field_info_present_flag = br.read_u1() != 0;
+        default_display_window_flag = br.read_u1() != 0;
+        if (default_display_window_flag) {
+            def_disp_win_left_offset = br.read_ue();
+            def_disp_win_right_offset = br.read_ue();
+            def_disp_win_top_offset = br.read_ue();
+            def_disp_win_bottom_offset = br.read_ue();
+        }
+        vui_timing_info_present_flag = br.read_u1() != 0;
+        if (vui_timing_info_present_flag) {
+            vui_num_units_in_tick = br.read_bits(32);
+            vui_time_scale = br.read_bits(32);
+            vui_poc_proportional_to_timing_flag = br.read_u1() != 0;
+            if (vui_poc_proportional_to_timing_flag) vui_num_ticks_poc_diff_one_minus1 = br.read_ue();
+            vui_hrd_parameters_present_flag = br.read_u1() != 0;
+            if (vui_hrd_parameters_present_flag) skip_hevc_hrd_parameters(br, true, sps_max_sub_layers_minus1);
+        }
+        bitstream_restriction_flag = br.read_u1() != 0;
+        if (bitstream_restriction_flag) {
+            br.read_u1();
+            br.read_u1();
+            br.read_u1();
+            br.read_ue();
+            br.read_ue();
+            br.read_ue();
+            br.read_ue();
+            br.read_ue();
+        }
+    }
+
+    uint32_t sub_width_c = (chroma_format_idc == 1 || chroma_format_idc == 2) ? 2 : 1;
+    uint32_t sub_height_c = chroma_format_idc == 1 ? 2 : 1;
+    uint32_t crop_unit_x = (chroma_format_idc == 0 || separate_colour_plane_flag) ? 1 : sub_width_c;
+    uint32_t crop_unit_y = (chroma_format_idc == 0 || separate_colour_plane_flag) ? 1 : sub_height_c;
+    uint32_t width = pic_width_in_luma_samples;
+    uint32_t height = pic_height_in_luma_samples;
+    if (conformance_window_flag) {
+        uint32_t crop_w = (conf_win_left_offset + conf_win_right_offset) * crop_unit_x;
+        uint32_t crop_h = (conf_win_top_offset + conf_win_bottom_offset) * crop_unit_y;
+        width = (width > crop_w) ? (width - crop_w) : 0;
+        height = (height > crop_h) ? (height - crop_h) : 0;
+    }
+
+    obj.add_uint("sps_id", sps_seq_parameter_set_id);
+    obj.add_uint("chroma_format_idc", chroma_format_idc);
+    if (chroma_format_idc == 3) obj.add_bool("separate_colour_plane_flag", separate_colour_plane_flag);
+    obj.add_uint("pic_width_in_luma_samples", pic_width_in_luma_samples);
+    obj.add_uint("pic_height_in_luma_samples", pic_height_in_luma_samples);
+    obj.add_bool("conformance_window_flag", conformance_window_flag);
+    if (conformance_window_flag) {
+        obj.add_uint("conf_win_left_offset", conf_win_left_offset);
+        obj.add_uint("conf_win_right_offset", conf_win_right_offset);
+        obj.add_uint("conf_win_top_offset", conf_win_top_offset);
+        obj.add_uint("conf_win_bottom_offset", conf_win_bottom_offset);
+        obj.add_uint("crop_unit_x", crop_unit_x);
+        obj.add_uint("crop_unit_y", crop_unit_y);
+    }
+    obj.add_uint("bit_depth_luma_minus8", bit_depth_luma_minus8);
+    obj.add_uint("bit_depth_chroma_minus8", bit_depth_chroma_minus8);
+    obj.add_uint("bit_depth_luma", bit_depth_luma_minus8 + 8);
+    obj.add_uint("bit_depth_chroma", bit_depth_chroma_minus8 + 8);
+    obj.add_uint("log2_max_pic_order_cnt_lsb_minus4", log2_max_pic_order_cnt_lsb_minus4);
+    obj.add_bool("sps_sub_layer_ordering_info_present_flag", sps_sub_layer_ordering_info_present_flag);
+    obj.add_raw("sub_layer_ordering_info", json_array_from_raw(sub_layer_ordering));
+    obj.add_uint("log2_min_luma_coding_block_size_minus3", log2_min_luma_coding_block_size_minus3);
+    obj.add_uint("log2_diff_max_min_luma_coding_block_size", log2_diff_max_min_luma_coding_block_size);
+    obj.add_uint("log2_min_luma_transform_block_size_minus2", log2_min_luma_transform_block_size_minus2);
+    obj.add_uint("log2_diff_max_min_luma_transform_block_size", log2_diff_max_min_luma_transform_block_size);
+    obj.add_uint("max_transform_hierarchy_depth_inter", max_transform_hierarchy_depth_inter);
+    obj.add_uint("max_transform_hierarchy_depth_intra", max_transform_hierarchy_depth_intra);
+    obj.add_bool("scaling_list_enabled_flag", scaling_list_enabled_flag);
+    if (scaling_list_enabled_flag) obj.add_bool("sps_scaling_list_data_present_flag", sps_scaling_list_data_present_flag);
+    obj.add_bool("amp_enabled_flag", amp_enabled_flag);
+    obj.add_bool("sample_adaptive_offset_enabled_flag", sample_adaptive_offset_enabled_flag);
+    obj.add_bool("pcm_enabled_flag", pcm_enabled_flag);
+    if (pcm_enabled_flag) {
+        obj.add_uint("pcm_sample_bit_depth_luma_minus1", pcm_sample_bit_depth_luma_minus1);
+        obj.add_uint("pcm_sample_bit_depth_chroma_minus1", pcm_sample_bit_depth_chroma_minus1);
+        obj.add_uint("log2_min_pcm_luma_coding_block_size_minus3", log2_min_pcm_luma_coding_block_size_minus3);
+        obj.add_uint("log2_diff_max_min_pcm_luma_coding_block_size", log2_diff_max_min_pcm_luma_coding_block_size);
+        obj.add_bool("pcm_loop_filter_disabled_flag", pcm_loop_filter_disabled_flag);
+    }
+    obj.add_uint("num_short_term_ref_pic_sets", num_short_term_ref_pic_sets);
+    obj.add_bool("long_term_ref_pics_present_flag", long_term_ref_pics_present_flag);
+    if (long_term_ref_pics_present_flag) obj.add_uint("num_long_term_ref_pics_sps", num_long_term_ref_pics_sps);
+    obj.add_bool("sps_temporal_mvp_enabled_flag", sps_temporal_mvp_enabled_flag);
+    obj.add_bool("strong_intra_smoothing_enabled_flag", strong_intra_smoothing_enabled_flag);
+    obj.add_bool("vui_parameters_present_flag", vui_parameters_present_flag);
+    if (vui_parameters_present_flag) {
+        obj.add_bool("aspect_ratio_info_present_flag", aspect_ratio_info_present_flag);
+        if (aspect_ratio_info_present_flag) {
+            obj.add_uint("aspect_ratio_idc", aspect_ratio_idc);
+            if (aspect_ratio_idc == 255) {
+                obj.add_uint("sar_width", sar_width);
+                obj.add_uint("sar_height", sar_height);
+            }
+        }
+        obj.add_bool("overscan_info_present_flag", overscan_info_present_flag);
+        obj.add_bool("video_signal_type_present_flag", video_signal_type_present_flag);
+        if (video_signal_type_present_flag) {
+            obj.add_uint("video_format", video_format);
+            obj.add_bool("video_full_range_flag", video_full_range_flag);
+            obj.add_bool("colour_description_present_flag", colour_description_present_flag);
+            if (colour_description_present_flag) {
+                obj.add_uint("colour_primaries", colour_primaries);
+                obj.add_uint("transfer_characteristics", transfer_characteristics);
+                obj.add_uint("matrix_coeffs", matrix_coeffs);
+            }
+        }
+        obj.add_bool("chroma_loc_info_present_flag", chroma_loc_info_present_flag);
+        if (chroma_loc_info_present_flag) {
+            obj.add_uint("chroma_sample_loc_type_top_field", chroma_sample_loc_type_top_field);
+            obj.add_uint("chroma_sample_loc_type_bottom_field", chroma_sample_loc_type_bottom_field);
+        }
+        obj.add_bool("neutral_chroma_indication_flag", neutral_chroma_indication_flag);
+        obj.add_bool("field_seq_flag", field_seq_flag);
+        obj.add_bool("frame_field_info_present_flag", frame_field_info_present_flag);
+        obj.add_bool("default_display_window_flag", default_display_window_flag);
+        if (default_display_window_flag) {
+            obj.add_uint("def_disp_win_left_offset", def_disp_win_left_offset);
+            obj.add_uint("def_disp_win_right_offset", def_disp_win_right_offset);
+            obj.add_uint("def_disp_win_top_offset", def_disp_win_top_offset);
+            obj.add_uint("def_disp_win_bottom_offset", def_disp_win_bottom_offset);
+        }
+        obj.add_bool("vui_timing_info_present_flag", vui_timing_info_present_flag);
+        if (vui_timing_info_present_flag) {
+            obj.add_uint("vui_num_units_in_tick", vui_num_units_in_tick);
+            obj.add_uint("vui_time_scale", vui_time_scale);
+            obj.add_bool("vui_poc_proportional_to_timing_flag", vui_poc_proportional_to_timing_flag);
+            if (vui_poc_proportional_to_timing_flag) obj.add_uint("vui_num_ticks_poc_diff_one_minus1", vui_num_ticks_poc_diff_one_minus1);
+            obj.add_bool("vui_hrd_parameters_present_flag", vui_hrd_parameters_present_flag);
+        }
+        obj.add_bool("bitstream_restriction_flag", bitstream_restriction_flag);
+    }
+    obj.add_uint("width", width);
+    obj.add_uint("height", height);
+    obj.add_uint("body_length", size);
+    printf("%s", obj.str().c_str());
 }
 
 static void print_hevc_pps(const uint8_t* data, int size) {
     if (size < 4) { printf("{\"body_length\":%d}", size); return; }
     BitReader br(data + 2, size - 2);
-    uint32_t pps_id = br.read_ue();
-    uint32_t sps_id = br.read_ue();
-    uint32_t dependent_slice = br.read_u1();
-    uint32_t output_flag_present = br.read_u1();
+    JsonObjectBuilder obj;
+
+    uint32_t pps_pic_parameter_set_id = br.read_ue();
+    uint32_t pps_seq_parameter_set_id = br.read_ue();
+    bool dependent_slice_segments_enabled_flag = br.read_u1() != 0;
+    bool output_flag_present_flag = br.read_u1() != 0;
     uint32_t num_extra_slice_header_bits = br.read_bits(3);
-    uint32_t sign_data_hiding = br.read_u1();
-    uint32_t cabac_init_present = br.read_u1();
-    uint32_t num_ref_l0 = br.read_ue() + 1;
-    uint32_t num_ref_l1 = br.read_ue() + 1;
-    int32_t init_qp = br.read_se() + 26;
-    printf("{\"pps_id\":%u,\"sps_id\":%u,\"dependent_slice_segments_enabled\":%u"
-           ",\"num_ref_idx_l0\":%u,\"num_ref_idx_l1\":%u,\"init_qp\":%d}",
-           pps_id, sps_id, dependent_slice, num_ref_l0, num_ref_l1, init_qp);
+    bool sign_data_hiding_enabled_flag = br.read_u1() != 0;
+    bool cabac_init_present_flag = br.read_u1() != 0;
+    uint32_t num_ref_idx_l0_default_active_minus1 = br.read_ue();
+    uint32_t num_ref_idx_l1_default_active_minus1 = br.read_ue();
+    int32_t init_qp_minus26 = br.read_se();
+    bool constrained_intra_pred_flag = br.read_u1() != 0;
+    bool transform_skip_enabled_flag = br.read_u1() != 0;
+    bool cu_qp_delta_enabled_flag = br.read_u1() != 0;
+    uint32_t diff_cu_qp_delta_depth = 0;
+    if (cu_qp_delta_enabled_flag) diff_cu_qp_delta_depth = br.read_ue();
+    int32_t pps_cb_qp_offset = br.read_se();
+    int32_t pps_cr_qp_offset = br.read_se();
+    bool pps_slice_chroma_qp_offsets_present_flag = br.read_u1() != 0;
+    bool weighted_pred_flag = br.read_u1() != 0;
+    bool weighted_bipred_flag = br.read_u1() != 0;
+    bool transquant_bypass_enabled_flag = br.read_u1() != 0;
+    bool tiles_enabled_flag = br.read_u1() != 0;
+    bool entropy_coding_sync_enabled_flag = br.read_u1() != 0;
+    uint32_t num_tile_columns_minus1 = 0;
+    uint32_t num_tile_rows_minus1 = 0;
+    bool uniform_spacing_flag = false;
+    std::vector<uint32_t> column_width_minus1;
+    std::vector<uint32_t> row_height_minus1;
+    bool loop_filter_across_tiles_enabled_flag = false;
+    if (tiles_enabled_flag) {
+        num_tile_columns_minus1 = br.read_ue();
+        num_tile_rows_minus1 = br.read_ue();
+        uniform_spacing_flag = br.read_u1() != 0;
+        if (!uniform_spacing_flag) {
+            for (uint32_t i = 0; i < num_tile_columns_minus1; i++) column_width_minus1.push_back(br.read_ue());
+            for (uint32_t i = 0; i < num_tile_rows_minus1; i++) row_height_minus1.push_back(br.read_ue());
+        }
+        loop_filter_across_tiles_enabled_flag = br.read_u1() != 0;
+    }
+    bool pps_loop_filter_across_slices_enabled_flag = br.read_u1() != 0;
+    bool deblocking_filter_control_present_flag = br.read_u1() != 0;
+    bool deblocking_filter_override_enabled_flag = false;
+    bool pps_deblocking_filter_disabled_flag = false;
+    int32_t pps_beta_offset_div2 = 0;
+    int32_t pps_tc_offset_div2 = 0;
+    if (deblocking_filter_control_present_flag) {
+        deblocking_filter_override_enabled_flag = br.read_u1() != 0;
+        pps_deblocking_filter_disabled_flag = br.read_u1() != 0;
+        if (!pps_deblocking_filter_disabled_flag) {
+            pps_beta_offset_div2 = br.read_se();
+            pps_tc_offset_div2 = br.read_se();
+        }
+    }
+    bool pps_scaling_list_data_present_flag = br.read_u1() != 0;
+    if (pps_scaling_list_data_present_flag) skip_hevc_scaling_list_data(br);
+    bool lists_modification_present_flag = br.read_u1() != 0;
+    uint32_t log2_parallel_merge_level_minus2 = br.read_ue();
+    bool slice_segment_header_extension_present_flag = br.read_u1() != 0;
+
+    obj.add_uint("pps_id", pps_pic_parameter_set_id);
+    obj.add_uint("sps_id", pps_seq_parameter_set_id);
+    obj.add_bool("dependent_slice_segments_enabled_flag", dependent_slice_segments_enabled_flag);
+    obj.add_bool("output_flag_present_flag", output_flag_present_flag);
+    obj.add_uint("num_extra_slice_header_bits", num_extra_slice_header_bits);
+    obj.add_bool("sign_data_hiding_enabled_flag", sign_data_hiding_enabled_flag);
+    obj.add_bool("cabac_init_present_flag", cabac_init_present_flag);
+    obj.add_uint("num_ref_idx_l0_default_active_minus1", num_ref_idx_l0_default_active_minus1);
+    obj.add_uint("num_ref_idx_l1_default_active_minus1", num_ref_idx_l1_default_active_minus1);
+    obj.add_uint("num_ref_idx_l0", num_ref_idx_l0_default_active_minus1 + 1);
+    obj.add_uint("num_ref_idx_l1", num_ref_idx_l1_default_active_minus1 + 1);
+    obj.add_int("init_qp_minus26", init_qp_minus26);
+    obj.add_int("init_qp", init_qp_minus26 + 26);
+    obj.add_bool("constrained_intra_pred_flag", constrained_intra_pred_flag);
+    obj.add_bool("transform_skip_enabled_flag", transform_skip_enabled_flag);
+    obj.add_bool("cu_qp_delta_enabled_flag", cu_qp_delta_enabled_flag);
+    if (cu_qp_delta_enabled_flag) obj.add_uint("diff_cu_qp_delta_depth", diff_cu_qp_delta_depth);
+    obj.add_int("pps_cb_qp_offset", pps_cb_qp_offset);
+    obj.add_int("pps_cr_qp_offset", pps_cr_qp_offset);
+    obj.add_bool("pps_slice_chroma_qp_offsets_present_flag", pps_slice_chroma_qp_offsets_present_flag);
+    obj.add_bool("weighted_pred_flag", weighted_pred_flag);
+    obj.add_bool("weighted_bipred_flag", weighted_bipred_flag);
+    obj.add_bool("transquant_bypass_enabled_flag", transquant_bypass_enabled_flag);
+    obj.add_bool("tiles_enabled_flag", tiles_enabled_flag);
+    obj.add_bool("entropy_coding_sync_enabled_flag", entropy_coding_sync_enabled_flag);
+    if (tiles_enabled_flag) {
+        obj.add_uint("num_tile_columns_minus1", num_tile_columns_minus1);
+        obj.add_uint("num_tile_rows_minus1", num_tile_rows_minus1);
+        obj.add_bool("uniform_spacing_flag", uniform_spacing_flag);
+        if (!column_width_minus1.empty()) obj.add_raw("column_width_minus1", json_array_from_uints(column_width_minus1));
+        if (!row_height_minus1.empty()) obj.add_raw("row_height_minus1", json_array_from_uints(row_height_minus1));
+        obj.add_bool("loop_filter_across_tiles_enabled_flag", loop_filter_across_tiles_enabled_flag);
+    }
+    obj.add_bool("pps_loop_filter_across_slices_enabled_flag", pps_loop_filter_across_slices_enabled_flag);
+    obj.add_bool("deblocking_filter_control_present_flag", deblocking_filter_control_present_flag);
+    if (deblocking_filter_control_present_flag) {
+        obj.add_bool("deblocking_filter_override_enabled_flag", deblocking_filter_override_enabled_flag);
+        obj.add_bool("pps_deblocking_filter_disabled_flag", pps_deblocking_filter_disabled_flag);
+        if (!pps_deblocking_filter_disabled_flag) {
+            obj.add_int("pps_beta_offset_div2", pps_beta_offset_div2);
+            obj.add_int("pps_tc_offset_div2", pps_tc_offset_div2);
+        }
+    }
+    obj.add_bool("pps_scaling_list_data_present_flag", pps_scaling_list_data_present_flag);
+    obj.add_bool("lists_modification_present_flag", lists_modification_present_flag);
+    obj.add_uint("log2_parallel_merge_level_minus2", log2_parallel_merge_level_minus2);
+    obj.add_bool("slice_segment_header_extension_present_flag", slice_segment_header_extension_present_flag);
+    obj.add_uint("body_length", size);
+    printf("%s", obj.str().c_str());
 }
 
 static const char* hevc_slice_type_name(int t) {

@@ -438,9 +438,14 @@ function naluTagClass(type) {
 }
 
 function detailToTable(detail) {
+  const formatValue = (v) => {
+    if (v === null) return 'null';
+    if (typeof v === 'object') return '<pre>' + JSON.stringify(v, null, 2) + '</pre>';
+    return String(v);
+  };
   let html = '<table>';
   for (const [k, v] of Object.entries(detail)) {
-    html += '<tr><td>' + k + '</td><td>' + v + '</td></tr>';
+    html += '<tr><td>' + k + '</td><td>' + formatValue(v) + '</td></tr>';
   }
   html += '</table>';
   return html;

@@ -80,9 +80,28 @@
   .view-toggle button:last-child { border-right: none; }
   .view-toggle button.active { background: #d63050; color: #fff; }
 
+  /* === AV Sync View === */
+  #avsyncArea { flex: 1; position: relative; overflow: hidden; cursor: default; background: #fff; display: none; flex-direction: column; }
+  #avsyncToolbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid #eee; background: #fafafa; flex-shrink: 0; }
+  #avsyncToolbar button { padding: 4px 12px; background: #eee; color: #444; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  #avsyncToolbar button:hover { background: #ddd; }
+  #avsyncStatus { font-size: 12px; color: #666; font-family: monospace; margin-left: 4px; }
+  #avsyncCanvasWrap { flex: 1; position: relative; padding-bottom: 16px; box-sizing: border-box; }
+  #avsyncCanvas { display: block; width: 100%; height: 100%; }
+  .avsync-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #555; margin-left: 8px; }
+  .avsync-line { width: 14px; height: 3px; border-radius: 999px; }
+  .avsync-audio { background: #0f8b8d; }
+  .avsync-video { background: #d63050; }
+  .avsync-alert { background: #f59f00; }
+  #avsyncLegend { position: absolute; top: 10px; right: 16px; display: flex; gap: 8px; z-index: 2; }
+  .avsync-legend-item { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid #d7d7d7; border-radius: 999px; background: rgba(255,255,255,0.92); color: #555; font-size: 12px; cursor: pointer; user-select: none; }
+  .avsync-legend-item:hover { background: #fff; border-color: #c6c6c6; }
+  .avsync-legend-item.dimmed { opacity: 0.45; }
+
   /* === Thumbnail View === */
   #thumbArea { flex: 1; position: relative; overflow: hidden; cursor: default; background: #fff; display: none; flex-direction: column; }
-  #thumbCanvas { display: block; flex: 1; }
+  #thumbCanvasWrap { flex: 1; position: relative; padding-bottom: 16px; box-sizing: border-box; }
+  #thumbCanvas { display: block; width: 100%; height: 100%; }
   #gopNav { display: flex; align-items: center; gap: 12px; padding: 6px 16px; background: #fafafa; border-bottom: 1px solid #eee; flex-shrink: 0; }
   #gopNav button { padding: 4px 12px; background: #eee; color: #444; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 12px; }
   #gopNav button:hover { background: #ddd; }
@@ -116,6 +135,7 @@
     <div class="view-toggle">
       <button id="btnBarChart" class="active" onclick="switchView('bar')">BarChart</button>
       <button id="btnThumbnails" onclick="switchView('thumb')">Thumbnails</button>
+      <button id="btnAVSync" onclick="switchView('avsync')">AVSync</button>
     </div>
     <div class="legend">
       <span><div class="dot dot-I"></div> I</span>
@@ -133,7 +153,24 @@
       <span id="gopInfo"></span>
       <button onclick="gopPageNext()">Next GOP ▶</button>
     </div>
-    <canvas id="thumbCanvas"></canvas>
+    <div id="thumbCanvasWrap">
+      <canvas id="thumbCanvas"></canvas>
+    </div>
+  </div>
+  <div id="avsyncArea">
+    <div id="avsyncToolbar">
+      <button onclick="resetAVSyncZoom()">Reset</button>
+      <span id="avsyncStatus"></span>
+      <span class="avsync-chip">Drag on chart to zoom</span>
+    </div>
+    <div id="avsyncCanvasWrap">
+      <canvas id="avsyncCanvas"></canvas>
+      <div id="avsyncLegend">
+        <div class="avsync-legend-item" data-series="audio" onclick="toggleAVSyncSeries('audio')"><span class="avsync-line avsync-audio"></span>Audio</div>
+        <div class="avsync-legend-item" data-series="video" onclick="toggleAVSyncSeries('video')"><span class="avsync-line avsync-video"></span>Video</div>
+        <div class="avsync-legend-item" data-series="drift" onclick="toggleAVSyncSeries('drift')"><span class="avsync-line avsync-alert"></span>Drift</div>
+      </div>
+    </div>
   </div>
   <div id="scrollBar"><div id="scrollThumb"></div></div>
   <div id="splitter"></div>
@@ -153,13 +190,19 @@ let visibleCount = 50;
 let dragging = false;
 let dragStartX = 0;
 let dragStartOffset = 0;
-let viewMode = 'bar'; // 'bar' or 'thumb'
+let viewMode = 'bar'; // 'bar' or 'thumb' or 'avsync'
 let thumbImages = {};  // cache: frame index -> Image object (small)
 let previewImages = {}; // cache: frame index -> data URI string (full res)
 let currentFile = '';
 let currentCodec = 'h264';
 let gops = []; // [{start, end}] GOP boundaries
 let currentGopIdx = 0; // which GOP is currently displayed
+let mediaDurationMs = 0;
+let avsyncData = { audio: [], video: [] };
+let avsyncDomain = { startMs: 0, endMs: 0, fullStartMs: 0, fullEndMs: 0 };
+const avsyncThresholdMs = 200;
+let avsyncSelection = null;
+let avsyncVisibleSeries = 'all';
 
 const colors = { I: '#d63050', P: '#2a7ab5', B: '#7b5ea7' };
 const colorsHover = { I: '#e8506e', P: '#3a8ec8', B: '#9070bb' };
@@ -173,15 +216,23 @@ const tooltip = document.getElementById('tooltip');
 const thumbCanvas = document.getElementById('thumbCanvas');
 const thumbCtx = thumbCanvas.getContext('2d');
 const thumbArea = document.getElementById('thumbArea');
+const avsyncArea = document.getElementById('avsyncArea');
+const avsyncCanvas = document.getElementById('avsyncCanvas');
+const avsyncCtx = avsyncCanvas.getContext('2d');
 
 /* ---- View switching ---- */
 function switchView(mode) {
   viewMode = mode;
   document.getElementById('btnBarChart').classList.toggle('active', mode === 'bar');
   document.getElementById('btnThumbnails').classList.toggle('active', mode === 'thumb');
+  document.getElementById('btnAVSync').classList.toggle('active', mode === 'avsync');
   chartArea.style.display = mode === 'bar' ? 'block' : 'none';
   thumbArea.style.display = mode === 'thumb' ? 'flex' : 'none';
+  avsyncArea.style.display = mode === 'avsync' ? 'flex' : 'none';
+  document.getElementById('splitter').style.display = mode === 'avsync' ? 'none' : 'flex';
+  document.getElementById('naluPanel').style.display = mode === 'avsync' ? 'none' : 'flex';
   document.getElementById('scrollBar').style.display = mode === 'bar' ? '' : 'none';
+  tooltip.style.display = 'none';
   if (mode === 'thumb') {
     // Find which GOP contains current offset
     currentGopIdx = gopIndexAt(offset);
@@ -225,12 +276,16 @@ async function doAnalyze() {
     maxSize = Math.max(...frames.map(f => f.size), 1);
     timeBaseNum = data.video.time_base_num || 1;
     timeBaseDen = data.video.time_base_den || 1;
+    mediaDurationMs = data.duration_ms || 0;
     offset = 0;
     currentFile = file;
     currentCodec = data.video.codec || 'h264';
     thumbImages = {};
     previewImages = {};
     loadedGops = new Set();
+    avsyncData = normalizeAVSyncData(data.avsync);
+    avsyncVisibleSeries = 'all';
+    resetAVSyncZoom();
     // Build GOP list from I-frame positions
     gops = [];
     for (let i = 0; i < frames.length; i++) {
@@ -257,11 +312,39 @@ function goBack() {
   document.getElementById('inputView').style.display = 'flex';
 }
 
+function normalizeAVSyncData(avsync) {
+  const normalized = { audio: [], video: [] };
+  if (!avsync) return normalized;
+  for (const key of ['audio', 'video']) {
+    normalized[key] = (avsync[key] || [])
+      .filter(p => Number.isFinite(p.time_ms) && Number.isFinite(p.decode_time_ms))
+      .sort((a, b) => a.time_ms - b.time_ms);
+  }
+  return normalized;
+}
+
+function seriesVisible(name) {
+  return avsyncVisibleSeries === 'all' || avsyncVisibleSeries === name;
+}
+
+function updateAVSyncLegend() {
+  document.querySelectorAll('#avsyncLegend .avsync-legend-item').forEach(el => {
+    const active = seriesVisible(el.dataset.series);
+    el.classList.toggle('dimmed', !active);
+  });
+}
+
+function toggleAVSyncSeries(name) {
+  avsyncVisibleSeries = avsyncVisibleSeries === name ? 'all' : name;
+  updateAVSyncLegend();
+  if (viewMode === 'avsync') drawAVSync();
+}
+
 /* ---- Drawing ---- */
 function draw(hoverIdx) {
   const w = canvas.width;
   const h = canvas.height;
-  const chartH = h - 30; // leave room for PTS labels
+  const chartH = h - 44; // leave room for PTS labels and bottom safe area
   ctx.clearRect(0, 0, w, h);
 
   // Y-axis grid lines
@@ -305,9 +388,9 @@ function draw(hoverIdx) {
       const xc = v.x + barWidth / 2;
       ctx.beginPath();
       ctx.moveTo(xc, chartH);
-      ctx.lineTo(xc, chartH + 4);
+      ctx.lineTo(xc, chartH + 6);
       ctx.stroke();
-      ctx.fillText(String(v.frame.pts), xc, h - 4);
+      ctx.fillText(String(v.frame.pts), xc, h - 14);
     }
   }
 
@@ -323,6 +406,232 @@ function draw(hoverIdx) {
   }
 
   updateScrollThumb();
+}
+
+function niceStepMs(spanMs, targetTicks) {
+  const raw = Math.max(spanMs / Math.max(1, targetTicks), 1);
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  const normalized = raw / magnitude;
+  let step = magnitude;
+  if (normalized > 5) step = 10 * magnitude;
+  else if (normalized > 2) step = 5 * magnitude;
+  else if (normalized > 1) step = 2 * magnitude;
+  return step;
+}
+
+function formatTimelineMs(ms, stepMs) {
+  if (!Number.isFinite(ms)) return '-';
+  if (stepMs >= 60000) return (ms / 60000).toFixed(ms >= 600000 ? 0 : 1) + 'm';
+  if (stepMs >= 1000) return (ms / 1000).toFixed(ms >= 10000 ? 0 : 1) + 's';
+  return Math.round(ms) + 'ms';
+}
+
+function getAVSyncBounds() {
+  const allPoints = [...avsyncData.audio, ...avsyncData.video];
+  if (!allPoints.length) return { minMs: 0, maxMs: 1 };
+  const values = allPoints.map(p => p.time_ms).filter(Number.isFinite);
+  if (!values.length) return { minMs: 0, maxMs: 1 };
+  const minMs = Math.min(...values);
+  const maxMs = Math.max(...values);
+  return { minMs, maxMs: maxMs > minMs ? maxMs : minMs + 1 };
+}
+
+function getAVSyncDomain() {
+  const bounds = getAVSyncBounds();
+  return {
+    startMs: avsyncDomain.startMs,
+    endMs: avsyncDomain.endMs,
+    fullStartMs: bounds.minMs,
+    fullEndMs: bounds.maxMs
+  };
+}
+
+function resetAVSyncZoom() {
+  const bounds = getAVSyncBounds();
+  avsyncDomain = {
+    startMs: bounds.minMs,
+    endMs: bounds.maxMs,
+    fullStartMs: bounds.minMs,
+    fullEndMs: bounds.maxMs
+  };
+  if (viewMode === 'avsync') drawAVSync();
+}
+
+function findNearestByTimeline(points, timeMs) {
+  if (!points.length) return null;
+  let lo = 0;
+  let hi = points.length - 1;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (points[mid].time_ms < timeMs) lo = mid + 1;
+    else hi = mid;
+  }
+  const curr = points[lo];
+  const prev = lo > 0 ? points[lo - 1] : null;
+  if (!prev) return curr;
+  return Math.abs(curr.time_ms - timeMs) < Math.abs(prev.time_ms - timeMs) ? curr : prev;
+}
+
+function getAVDriftPoints(startMs, endMs) {
+  const driftPoints = [];
+  for (const videoPoint of avsyncData.video) {
+    if (videoPoint.time_ms < startMs || videoPoint.time_ms > endMs) continue;
+    const audioPoint = findNearestByTimeline(avsyncData.audio, videoPoint.time_ms);
+    if (!audioPoint) continue;
+    const drift = Math.abs(audioPoint.decode_time_ms - videoPoint.decode_time_ms);
+    if (drift > avsyncThresholdMs) {
+      driftPoints.push({
+        time_ms: videoPoint.time_ms,
+        video_decode_ms: videoPoint.decode_time_ms,
+        audio_decode_ms: audioPoint.decode_time_ms,
+        drift_ms: drift
+      });
+    }
+  }
+  return driftPoints;
+}
+
+function drawSeriesLine(ctx2d, points, color, projectX, projectY) {
+  let started = false;
+  ctx2d.beginPath();
+  for (const point of points) {
+    if (!Number.isFinite(point.time_ms) || !Number.isFinite(point.decode_time_ms)) continue;
+    const x = projectX(point.time_ms);
+    const y = projectY(point.decode_time_ms);
+    if (!started) {
+      ctx2d.moveTo(x, y);
+      started = true;
+    } else {
+      ctx2d.lineTo(x, y);
+    }
+  }
+  if (!started) return;
+  ctx2d.strokeStyle = color;
+  ctx2d.lineWidth = 2;
+  ctx2d.stroke();
+}
+
+function drawAVSync() {
+  const w = avsyncCanvas.width;
+  const h = avsyncCanvas.height;
+  avsyncCtx.clearRect(0, 0, w, h);
+  updateAVSyncLegend();
+
+  if (!avsyncData.audio.length && !avsyncData.video.length) {
+    avsyncCtx.fillStyle = '#888';
+    avsyncCtx.font = '13px system-ui';
+    avsyncCtx.textAlign = 'center';
+    avsyncCtx.fillText('No AV sync data available', w / 2, h / 2);
+    document.getElementById('avsyncStatus').textContent = '';
+    return;
+  }
+
+  const domain = getAVSyncDomain();
+  const startMs = domain.startMs;
+  const endMs = Math.max(domain.startMs + 1, domain.endMs);
+  const spanMs = endMs - startMs;
+  const padding = { left: 64, right: 24, top: 20, bottom: 64 };
+  const plotW = Math.max(1, w - padding.left - padding.right);
+  const plotH = Math.max(1, h - padding.top - padding.bottom);
+
+  const visibleAudio = avsyncData.audio.filter(p => p.time_ms >= startMs && p.time_ms <= endMs);
+  const visibleVideo = avsyncData.video.filter(p => p.time_ms >= startMs && p.time_ms <= endMs);
+  const visiblePoints = [...visibleAudio, ...visibleVideo];
+  const minDecode = visiblePoints.length ? Math.min(...visiblePoints.map(p => p.decode_time_ms)) : startMs;
+  const maxDecode = visiblePoints.length ? Math.max(...visiblePoints.map(p => p.decode_time_ms)) : endMs;
+  const yMin = Math.min(minDecode, startMs);
+  const yMaxBase = Math.max(maxDecode, endMs);
+  const yPad = Math.max(40, (yMaxBase - yMin) * 0.05);
+  const yMax = yMaxBase + yPad;
+
+  const projectX = (ms) => padding.left + ((ms - startMs) / spanMs) * plotW;
+  const projectY = (ms) => padding.top + plotH - ((ms - yMin) / Math.max(1, yMax - yMin)) * plotH;
+  avsyncCanvas._plotMetrics = { padding, plotW, plotH, startMs, endMs, spanMs };
+
+  avsyncCtx.strokeStyle = '#e8e8e8';
+  avsyncCtx.lineWidth = 1;
+  const xStep = niceStepMs(spanMs, Math.max(4, Math.floor(plotW / 120)));
+  const xFirst = Math.ceil(startMs / xStep) * xStep;
+  avsyncCtx.fillStyle = '#888';
+  avsyncCtx.font = '11px system-ui';
+  avsyncCtx.textAlign = 'center';
+  for (let tick = xFirst; tick <= endMs; tick += xStep) {
+    const x = projectX(tick);
+    avsyncCtx.beginPath();
+    avsyncCtx.moveTo(x, padding.top);
+    avsyncCtx.lineTo(x, padding.top + plotH);
+    avsyncCtx.stroke();
+    avsyncCtx.fillText(formatTimelineMs(tick, xStep), x, h - 28);
+  }
+
+  const ySpan = Math.max(1, yMax - yMin);
+  const yStep = niceStepMs(ySpan, 5);
+  const yFirst = Math.ceil(yMin / yStep) * yStep;
+  avsyncCtx.textAlign = 'right';
+  for (let tick = yFirst; tick <= yMax; tick += yStep) {
+    const y = projectY(tick);
+    avsyncCtx.beginPath();
+    avsyncCtx.moveTo(padding.left, y);
+    avsyncCtx.lineTo(w - padding.right, y);
+    avsyncCtx.stroke();
+    avsyncCtx.fillText(formatTimelineMs(tick, yStep), padding.left - 8, y + 4);
+  }
+
+  avsyncCtx.strokeStyle = '#cfcfcf';
+  avsyncCtx.lineWidth = 1.5;
+  avsyncCtx.beginPath();
+  avsyncCtx.moveTo(padding.left, padding.top);
+  avsyncCtx.lineTo(padding.left, padding.top + plotH);
+  avsyncCtx.lineTo(w - padding.right, padding.top + plotH);
+  avsyncCtx.stroke();
+
+  const driftPoints = getAVDriftPoints(startMs, endMs);
+  if (seriesVisible('drift')) {
+    for (const drift of driftPoints) {
+      const x = projectX(drift.time_ms);
+      avsyncCtx.strokeStyle = 'rgba(245, 159, 0, 0.22)';
+      avsyncCtx.lineWidth = 3;
+      avsyncCtx.beginPath();
+      avsyncCtx.moveTo(x, padding.top);
+      avsyncCtx.lineTo(x, padding.top + plotH);
+      avsyncCtx.stroke();
+
+      avsyncCtx.fillStyle = '#f59f00';
+      avsyncCtx.beginPath();
+      avsyncCtx.arc(x, projectY(drift.video_decode_ms), 3.5, 0, Math.PI * 2);
+      avsyncCtx.fill();
+    }
+  }
+
+  if (seriesVisible('audio')) drawSeriesLine(avsyncCtx, visibleAudio, '#0f8b8d', projectX, projectY);
+  if (seriesVisible('video')) drawSeriesLine(avsyncCtx, visibleVideo, '#d63050', projectX, projectY);
+
+  avsyncCtx.fillStyle = '#666';
+  avsyncCtx.font = '12px system-ui';
+  avsyncCtx.textAlign = 'center';
+  avsyncCtx.fillText('timeline', padding.left + plotW / 2, h - 10);
+
+  avsyncCtx.save();
+  avsyncCtx.translate(16, padding.top + plotH / 2);
+  avsyncCtx.rotate(-Math.PI / 2);
+  avsyncCtx.fillText('decodeTimestamp', 0, 0);
+  avsyncCtx.restore();
+
+  if (avsyncSelection && Number.isFinite(avsyncSelection.currentX)) {
+    const left = Math.max(padding.left, Math.min(avsyncSelection.startX, avsyncSelection.currentX));
+    const right = Math.min(w - padding.right, Math.max(avsyncSelection.startX, avsyncSelection.currentX));
+    const width = Math.max(0, right - left);
+    if (width > 0) {
+      avsyncCtx.fillStyle = 'rgba(214, 48, 80, 0.12)';
+      avsyncCtx.strokeStyle = 'rgba(214, 48, 80, 0.45)';
+      avsyncCtx.lineWidth = 1;
+      avsyncCtx.fillRect(left, padding.top, width, plotH);
+      avsyncCtx.strokeRect(left, padding.top, width, plotH);
+    }
+  }
+
+  document.getElementById('avsyncStatus').textContent =
+    `${formatTimelineMs(startMs, xStep)} - ${formatTimelineMs(endMs, xStep)} | A:${visibleAudio.length} V:${visibleVideo.length} | Drift>${avsyncThresholdMs}ms: ${driftPoints.length}`;
 }
 
 /* ---- Scroll thumb ---- */
@@ -341,17 +650,28 @@ function updateScrollThumb() {
 /* ---- Resize ---- */
 function onResize() {
   const rect = chartArea.getBoundingClientRect();
-  canvas.width = rect.width;
-  canvas.height = rect.height;
-  visibleCount = Math.floor((canvas.width - 42) / (barWidth + barGap));
+  if (rect.width > 0 && rect.height > 0) {
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+    visibleCount = Math.max(1, Math.floor((canvas.width - 42) / (barWidth + barGap)));
+  }
 
   const trect = thumbCanvas.getBoundingClientRect();
-  thumbCanvas.width = trect.width;
-  thumbCanvas.height = trect.height;
+  if (trect.width > 0 && trect.height > 0) {
+    thumbCanvas.width = trect.width;
+    thumbCanvas.height = trect.height;
+  }
+
+  const arect = avsyncCanvas.getBoundingClientRect();
+  if (arect.width > 0 && arect.height > 0) {
+    avsyncCanvas.width = arect.width;
+    avsyncCanvas.height = arect.height;
+  }
 
   clampOffset();
   if (viewMode === 'bar') draw(-1);
-  else drawThumbnails(-1);
+  else if (viewMode === 'thumb') drawThumbnails(-1);
+  else drawAVSync();
 }
 
 function clampOffset() {
@@ -361,6 +681,7 @@ function clampOffset() {
 /* ---- Chart drag to pan ---- */
 let dragMoved = false;
 chartArea.addEventListener('mousedown', e => {
+  if (viewMode !== 'bar') return;
   dragging = true;
   dragMoved = false;
   dragStartX = e.clientX;
@@ -368,7 +689,7 @@ chartArea.addEventListener('mousedown', e => {
   chartArea.classList.add('grabbing');
 });
 window.addEventListener('mousemove', e => {
-  if (!dragging) return;
+  if (!dragging || viewMode !== 'bar') return;
   const dx = dragStartX - e.clientX;
   if (Math.abs(dx) > 3) dragMoved = true;
   const frameDelta = Math.round(dx / (barWidth + barGap));
@@ -383,6 +704,7 @@ window.addEventListener('mouseup', () => {
 
 /* ---- Mouse wheel to scroll ---- */
 chartArea.addEventListener('wheel', e => {
+  if (viewMode !== 'bar') return;
   e.preventDefault();
   offset += Math.sign(e.deltaY) * Math.max(1, Math.floor(visibleCount / 5));
   clampOffset();
@@ -391,6 +713,7 @@ chartArea.addEventListener('wheel', e => {
 
 /* ---- Hover tooltip ---- */
 chartArea.addEventListener('mousemove', e => {
+  if (viewMode !== 'bar') return;
   if (dragging) { tooltip.style.display = 'none'; return; }
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left - 42;
@@ -410,6 +733,7 @@ chartArea.addEventListener('mouseleave', () => { tooltip.style.display = 'none';
 /* ---- Click to show NALU panel ---- */
 let selectedFrame = -1;
 chartArea.addEventListener('click', e => {
+  if (viewMode !== 'bar') return;
   if (dragMoved) return;
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left - 42;
@@ -653,7 +977,7 @@ function drawThumbnails(hoverIdx) {
   // Draw reference arrows below text area
   // Arrow direction: from referencing frame -> to referenced frame
   // e.g. P references I, arrow goes P -> I
-  const arrowY = textY + 44;
+  const arrowY = textY + 40;
   const visFrames = [];
   for (let i = 0; i < screenCap; i++) {
     const fi = offset + i;
@@ -756,13 +1080,14 @@ function getThumbFrameAt(e) {
 let thumbDragging = false, thumbDragMoved = false, thumbDragStartX = 0, thumbDragStartOffset = 0;
 
 thumbArea.addEventListener('mousedown', e => {
+  if (viewMode !== 'thumb') return;
   if (e.target.tagName === 'BUTTON') return;
   thumbDragging = true; thumbDragMoved = false;
   thumbDragStartX = e.clientX; thumbDragStartOffset = offset;
   thumbArea.style.cursor = 'grabbing';
 });
 window.addEventListener('mousemove', e => {
-  if (!thumbDragging) return;
+  if (!thumbDragging || viewMode !== 'thumb') return;
   const thumbH = Math.min(60, thumbCanvas.height * 0.35);
   const cellW = Math.round(thumbH * 16/9) + 4;
   const dx = thumbDragStartX - e.clientX;
@@ -777,6 +1102,7 @@ window.addEventListener('mouseup', () => {
 });
 
 thumbArea.addEventListener('wheel', e => {
+  if (viewMode !== 'thumb') return;
   e.preventDefault();
   offset += Math.sign(e.deltaY) * 3;
   clampThumbOffset();
@@ -784,13 +1110,15 @@ thumbArea.addEventListener('wheel', e => {
 }, { passive: false });
 
 thumbArea.addEventListener('mousemove', e => {
+  if (viewMode !== 'thumb') return;
   if (thumbDragging) return;
   const fi = getThumbFrameAt(e);
   drawThumbnails(fi);
 });
-thumbArea.addEventListener('mouseleave', () => drawThumbnails(-1));
+thumbArea.addEventListener('mouseleave', () => { if (viewMode === 'thumb') drawThumbnails(-1); });
 
 thumbArea.addEventListener('click', e => {
+  if (viewMode !== 'thumb') return;
   if (thumbDragMoved) return;
   const fi = getThumbFrameAt(e);
   if (fi < 0) return;
@@ -840,6 +1168,55 @@ function jumpToPts(val) {
   }
 }
 
+function avsyncMsFromCanvasX(clientX) {
+  const rect = avsyncCanvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const metrics = avsyncCanvas._plotMetrics;
+  if (!metrics) return null;
+  const clampedX = Math.max(metrics.padding.left, Math.min(x, avsyncCanvas.width - metrics.padding.right));
+  const ratio = (clampedX - metrics.padding.left) / Math.max(1, metrics.plotW);
+  return metrics.startMs + ratio * metrics.spanMs;
+}
+
+avsyncArea.addEventListener('mousedown', e => {
+  if (viewMode !== 'avsync') return;
+  if (e.target.tagName === 'BUTTON') return;
+  const rect = avsyncCanvas.getBoundingClientRect();
+  const metrics = avsyncCanvas._plotMetrics;
+  if (!metrics) return;
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  if (x < metrics.padding.left || x > avsyncCanvas.width - metrics.padding.right) return;
+  if (y < metrics.padding.top || y > metrics.padding.top + metrics.plotH) return;
+  avsyncSelection = { startX: x, currentX: x };
+  drawAVSync();
+});
+
+window.addEventListener('mousemove', e => {
+  if (!avsyncSelection || viewMode !== 'avsync') return;
+  const rect = avsyncCanvas.getBoundingClientRect();
+  avsyncSelection.currentX = e.clientX - rect.left;
+  drawAVSync();
+});
+
+window.addEventListener('mouseup', e => {
+  if (!avsyncSelection || viewMode !== 'avsync') return;
+  const startMs = avsyncMsFromCanvasX(avsyncCanvas.getBoundingClientRect().left + avsyncSelection.startX);
+  const endMs = avsyncMsFromCanvasX(e.clientX);
+  const metrics = avsyncCanvas._plotMetrics;
+  const minRange = Math.max(10, (metrics ? metrics.spanMs * 0.01 : 10));
+  if (startMs !== null && endMs !== null) {
+    const left = Math.min(startMs, endMs);
+    const right = Math.max(startMs, endMs);
+    if (right - left >= minRange) {
+      avsyncDomain.startMs = left;
+      avsyncDomain.endMs = right;
+    }
+  }
+  avsyncSelection = null;
+  drawAVSync();
+});
+
 /* ---- Scrollbar drag ---- */
 const scrollBar = document.getElementById('scrollBar');
 const scrollThumb = document.getElementById('scrollThumb');
@@ -868,6 +1245,7 @@ window.addEventListener('mouseup', () => { thumbDrag = false; scrollThumb.classL
 
 scrollBar.addEventListener('click', e => {
   if (thumbDrag) return;
+  if (viewMode === 'avsync') return;
   const rect = scrollBar.getBoundingClientRect();
   const ratio = (e.clientX - rect.left) / rect.width;
   offset = Math.round(ratio * (frames.length - visibleCount));
@@ -905,6 +1283,7 @@ window.addEventListener('keydown', e => {
   const prev = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
   const next = e.key === 'ArrowRight' || e.key === 'ArrowDown';
   if (!prev && !next) return;
+  if (viewMode === 'avsync') return;
   e.preventDefault();
   if (selectedFrame < 0) selectedFrame = offset;
   selectedFrame = Math.max(0, Math.min(frames.length - 1, selectedFrame + (next ? 1 : -1)));

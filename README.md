@@ -31,6 +31,8 @@ The app currently exposes the following analysis views:
   Visualizes packet size per frame and lets you hover or click frames to inspect metadata and NALUs.
 - `Thumbnail view`
   Loads decoded thumbnails GOP by GOP and shows approximate frame dependency relationships for the selected frame.
+- `AV sync view`
+  Draws audio and video decode timestamps on a shared timeline, supports zooming, and highlights segments whose A/V drift exceeds `200ms`.
 - `NALU detail panel`
   Parses and displays structured fields for common H.264/H.265 units such as:
   - H.264: `SPS`, `PPS`, `SEI`, slice headers
@@ -142,7 +144,7 @@ After starting the desktop app:
 
 1. Open a local video file.
 2. Analyze the stream.
-3. Switch between `BarChart` and `Thumbnails`.
+3. Switch between `BarChart`, `Thumbnails`, and `AVSync`.
 4. Click a frame to inspect NALUs or frame preview data.
 
 ## Browser-Only Local UI Development

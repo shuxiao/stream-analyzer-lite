@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
@@ -287,6 +288,70 @@ static std::string json_array_from_raw(const std::vector<std::string>& values) {
     }
     out += "]";
     return out;
+}
+
+struct AVSyncPoint {
+    int index = 0;
+    int64_t pts = AV_NOPTS_VALUE;
+    int64_t dts = AV_NOPTS_VALUE;
+    double time_ms = NAN;
+    double decode_time_ms = NAN;
+};
+
+static double timestamp_to_ms(int64_t ts, AVRational tb) {
+    if (ts == AV_NOPTS_VALUE || tb.den == 0) return NAN;
+    return (double)ts * (double)tb.num * 1000.0 / (double)tb.den;
+}
+
+static double stream_duration_ms(const AVStream* stream) {
+    if (!stream) return NAN;
+    return timestamp_to_ms(stream->duration, stream->time_base);
+}
+
+static int64_t packet_timeline_ts(const AVPacket& pkt) {
+    return pkt.pts != AV_NOPTS_VALUE ? pkt.pts : pkt.dts;
+}
+
+static int64_t packet_decode_ts(const AVPacket& pkt) {
+    return pkt.dts != AV_NOPTS_VALUE ? pkt.dts : pkt.pts;
+}
+
+static void print_json_int64_or_null(int64_t value) {
+    if (value == AV_NOPTS_VALUE) printf("null");
+    else printf("%lld", (long long)value);
+}
+
+static void print_json_double_or_null(double value) {
+    if (!std::isfinite(value)) printf("null");
+    else printf("%.3f", value);
+}
+
+static void print_stream_meta_json_or_null(const AVStream* stream) {
+    if (!stream) {
+        printf("null");
+        return;
+    }
+    std::string codec = json_escape(avcodec_get_name(stream->codecpar->codec_id));
+    printf("{\"codec\":\"%s\",\"time_base_num\":%d,\"time_base_den\":%d}",
+           codec.c_str(), stream->time_base.num, stream->time_base.den);
+}
+
+static void print_avsync_points_json(const std::vector<AVSyncPoint>& points) {
+    printf("[");
+    for (size_t i = 0; i < points.size(); i++) {
+        const auto& point = points[i];
+        if (i > 0) printf(",");
+        printf("{\"index\":%d,\"pts\":", point.index);
+        print_json_int64_or_null(point.pts);
+        printf(",\"dts\":");
+        print_json_int64_or_null(point.dts);
+        printf(",\"time_ms\":");
+        print_json_double_or_null(point.time_ms);
+        printf(",\"decode_time_ms\":");
+        print_json_double_or_null(point.decode_time_ms);
+        printf("}");
+    }
+    printf("]");
 }
 
 static std::string hex_string(uint64_t value, int width = 0) {
@@ -1508,11 +1573,19 @@ int main(int argc, char* argv[]) {
     }
 
     int video_idx = -1;
+    int audio_idx = -1;
     for (unsigned i = 0; i < fmt_ctx->nb_streams; i++) {
         auto cid = fmt_ctx->streams[i]->codecpar->codec_id;
         if (cid == AV_CODEC_ID_H264 || cid == AV_CODEC_ID_HEVC) {
             video_idx = i;
             g_is_hevc = (cid == AV_CODEC_ID_HEVC);
+            break;
+        }
+    }
+    for (unsigned i = 0; i < fmt_ctx->nb_streams; i++) {
+        if ((int)i == video_idx) continue;
+        if (fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            audio_idx = i;
             break;
         }
     }
@@ -1578,7 +1651,16 @@ int main(int argc, char* argv[]) {
             extra_nalus = parse_nalus_annexb(par->extradata, par->extradata_size);
     }
 
-    auto tb = fmt_ctx->streams[video_idx]->time_base;
+    auto* video_stream = fmt_ctx->streams[video_idx];
+    auto* audio_stream = audio_idx >= 0 ? fmt_ctx->streams[audio_idx] : nullptr;
+    auto tb = video_stream->time_base;
+    double video_duration_ms = stream_duration_ms(video_stream);
+    double audio_duration_ms = stream_duration_ms(audio_stream);
+    double format_duration_ms = timestamp_to_ms(fmt_ctx->duration, AVRational{1, AV_TIME_BASE});
+    double duration_ms = NAN;
+    if (std::isfinite(video_duration_ms)) duration_ms = video_duration_ms;
+    else if (std::isfinite(audio_duration_ms)) duration_ms = audio_duration_ms;
+    else if (std::isfinite(format_duration_ms)) duration_ms = format_duration_ms;
 
     // Setup decoder if thumbnails requested
     AVCodecContext* dec_ctx = nullptr;
@@ -1604,10 +1686,19 @@ int main(int argc, char* argv[]) {
     bool range_mode = g_range_start >= 0 && g_thumbnails;
     int range_out = 0; // count of items output in range mode
 
+    std::vector<AVSyncPoint> video_sync_points;
+    std::vector<AVSyncPoint> audio_sync_points;
+
     if (range_mode)
         printf("{\"thumbnails\":[");
-    else
-        printf("{\"video\":{\"width\":%d,\"height\":%d,\"codec\":\"%s\",\"time_base_num\":%d,\"time_base_den\":%d},\"frames\":[", par->width, par->height, g_is_hevc ? "h265" : "h264", tb.num, tb.den);
+    else {
+        printf("{\"video\":{\"width\":%d,\"height\":%d,\"codec\":\"%s\",\"time_base_num\":%d,\"time_base_den\":%d},\"audio\":",
+               par->width, par->height, g_is_hevc ? "h265" : "h264", tb.num, tb.den);
+        print_stream_meta_json_or_null(audio_stream);
+        printf(",\"duration_ms\":");
+        print_json_double_or_null(duration_ms);
+        printf(",\"frames\":[");
+    }
 
     // For range mode: map packet index -> pts for matching decoded frames
     std::vector<int64_t> frame_pts;
@@ -1618,6 +1709,16 @@ int main(int argc, char* argv[]) {
     std::unordered_map<int64_t, int> pts_to_idx; // pts -> frame index
 
     while (av_read_frame(fmt_ctx, &pkt) >= 0) {
+        if (!range_mode && pkt.stream_index == audio_idx) {
+            AVSyncPoint point;
+            point.index = (int)audio_sync_points.size();
+            point.pts = pkt.pts;
+            point.dts = pkt.dts;
+            point.time_ms = timestamp_to_ms(packet_timeline_ts(pkt), audio_stream->time_base);
+            point.decode_time_ms = timestamp_to_ms(packet_decode_ts(pkt), audio_stream->time_base);
+            audio_sync_points.push_back(point);
+        }
+
         if (pkt.stream_index == video_idx) {
             // In range mode, stop early once past the range
             if (range_mode && idx >= range_end) { av_packet_unref(&pkt); break; }
@@ -1659,6 +1760,13 @@ int main(int argc, char* argv[]) {
             } else {
                 // Normal full output mode
                 const char* type = (pkt.flags & AV_PKT_FLAG_KEY) ? "I" : "P";
+                AVSyncPoint point;
+                point.index = idx;
+                point.pts = pkt.pts;
+                point.dts = pkt.dts;
+                point.time_ms = timestamp_to_ms(packet_timeline_ts(pkt), video_stream->time_base);
+                point.decode_time_ms = timestamp_to_ms(packet_decode_ts(pkt), video_stream->time_base);
+                video_sync_points.push_back(point);
                 if (idx > 0) printf(",");
                 printf("{\"index\":%d,\"type\":\"%s\",\"pts\":%ld,\"size\":%d", idx, type, (long)pkt.pts, pkt.size);
 
@@ -1733,8 +1841,15 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (range_mode) printf("]}");
-    else printf("]}");
+    if (range_mode) {
+        printf("]}");
+    } else {
+        printf("],\"avsync\":{\"video\":");
+        print_avsync_points_json(video_sync_points);
+        printf(",\"audio\":");
+        print_avsync_points_json(audio_sync_points);
+        printf("}}");
+    }
     if (dec_frame) av_frame_free(&dec_frame);
     if (dec_ctx) avcodec_free_context(&dec_ctx);
     avformat_close_input(&fmt_ctx);
